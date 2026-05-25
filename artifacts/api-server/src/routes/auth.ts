@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { google } from "googleapis";
 import { db, usersTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, count as sqlCount } from "drizzle-orm";
 import {
   isGoogleOAuthConfigured, makeOAuthClient, ALL_SCOPES, SCOPE_GROUPS,
   exchangeCodeAndStore,
