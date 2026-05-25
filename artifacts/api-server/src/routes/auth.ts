@@ -120,8 +120,9 @@ router.post("/auth/signup", async (req, res) => {
     }
     const passwordHash = await bcrypt.hash(password, 10);
     // First user becomes admin automatically
-    const [{ count }] = await db.select({ count: usersTable.id }).from(usersTable).limit(1);
-    const isFirstUser = !count;
+    const countResult = await db.select({ count: sqlCount() }).from(usersTable);
+    const userCount = Number(countResult[0]?.count ?? 0);
+    const isFirstUser = userCount === 0;
     const [user] = await db.insert(usersTable).values({
       email, name, passwordHash,
       role: isFirstUser ? "admin" : "consultant",
