@@ -74,6 +74,10 @@ export const foundersTable = pgTable("founders", {
   // Sprint host + co-host names (from Overview sheet); flow into emails.
   sprintHost: text("sprint_host"),
   coHost: text("co_host"),
+  // URL of the Google Sheet this company was ingested from. Used by the
+  // "Re-sync from Sheets" button — we hit the same sheet and re-parse it.
+  // null when the company was created from a manual file upload or by hand.
+  sourceSheetUrl: text("source_sheet_url"),
   // -----------------------------------------------------------------------
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

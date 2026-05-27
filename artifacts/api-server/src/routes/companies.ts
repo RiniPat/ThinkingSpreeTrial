@@ -1,8 +1,9 @@
 import { Router } from "express";
 import multer from "multer";
-import { db, foundersTable, incubatorsTable, companyEventsTable, usersTable } from "@workspace/db";
+import { db, foundersTable, incubatorsTable, companyEventsTable, emailDraftsTable, usersTable } from "@workspace/db";
 import { eq, and, desc, asc, sql } from "drizzle-orm";
-import { parseSprintTemplate } from "../lib/sprintTemplateParser";
+import { parseSprintTemplate, parseSprintTemplateWorkbook } from "../lib/sprintTemplateParser";
+import { fetchSheetAsWorkbook, extractSheetId } from "../lib/sheetsFetcher";
 
 const router = Router();
 
@@ -101,6 +102,7 @@ router.get("/companies/:id", async (req, res) => {
         cohortName: incubatorsTable.name,
         deckUrl: foundersTable.deckUrl,
         thinkingSheetUrl: foundersTable.thinkingSheetUrl,
+        sourceSheetUrl: foundersTable.sourceSheetUrl,
         vision: foundersTable.vision,
         stageWorkflow: foundersTable.stageWorkflow,
         ownerId: foundersTable.ownerId,
@@ -139,21 +141,106 @@ router.get("/companies/:id", async (req, res) => {
   }
 });
 
-// ─── POST /companies/upload-template — the magic endpoint ────────────────
+// ─── Shared ingestion helper ─────────────────────────────────────────────
 /**
- * multipart/form-data:
- *   file:           .xlsx — the Sprint Template
- *   cohortOverride: (optional) cohort name to use if Excel cell is empty
- *   founderEmail:   (optional) manual founder email if Excel didn't have one
+ * Given a parsed Sprint Template, upsert the company + cohort + log a
+ * timeline event. Returns the company id and whether it's new.
  *
- * Behavior:
- *   1. Parse the template (throws 400 if Company / Founder missing).
- *   2. Find-or-create the cohort (uses incubators table).
- *   3. Find-or-create the founder row (matched by companyName + ownerId).
- *      • Existing row → merge: only fill empty fields, never overwrite.
- *   4. Log a 'template_uploaded' event.
- *   5. Return the parsed payload + the created/updated company id.
+ * Called by both:
+ *   - POST /companies/upload-template  (file upload, legacy)
+ *   - POST /companies/ingest-sheet     (Google Sheets URL — new in v4.4)
+ *   - POST /companies/:id/resync       (re-pull from previously-saved Sheets URL)
+ *
+ * Behavior is identical across all three entry points so consultants get the
+ * same merge semantics whether they upload a file or paste a sheet link.
  */
+async function ingestParsedTemplate(opts: {
+  userId: number;
+  parsed: ReturnType<typeof parseSprintTemplate>;
+  cohortOverride?: string;
+  founderEmailOverride?: string;
+  sourceSheetUrl?: string | null;
+  noteVerb: string;          // e.g. "Uploaded", "Synced", "Re-synced"
+  sourceLabel: string;       // e.g. "Sprint_Template.xlsx" or "Google Sheet"
+}) {
+  const { userId, parsed, cohortOverride, founderEmailOverride, sourceSheetUrl, noteVerb, sourceLabel } = opts;
+
+  const cohortName = (cohortOverride?.trim() || parsed.cohort?.trim() || "").trim();
+  // Priority: manual form field > parsed Excel value > existing row's email > placeholder.
+  const founderEmailInput = (founderEmailOverride?.trim() || parsed.founderEmail?.trim() || "").trim();
+
+  // ── 1. Find or create the cohort ────────────────────────────────────────
+  let cohortId: number | null = null;
+  if (cohortName) {
+    const [existingCohort] = await db.select().from(incubatorsTable)
+      .where(sql`LOWER(${incubatorsTable.name}) = LOWER(${cohortName})`)
+      .limit(1);
+    if (existingCohort) {
+      cohortId = existingCohort.id;
+    } else {
+      const [created] = await db.insert(incubatorsTable).values({
+        name: cohortName,
+        type: "incubator",
+        description: `Auto-created from Sprint Template`,
+      }).returning();
+      cohortId = created.id;
+    }
+  }
+
+  // ── 2. Find or create the founder/company row ──────────────────────────
+  const [existing] = await db.select().from(foundersTable)
+    .where(and(
+      sql`LOWER(${foundersTable.companyName}) = LOWER(${parsed.companyName})`,
+      eq(foundersTable.ownerId, userId),
+    ))
+    .limit(1);
+
+  const payload = {
+    companyName: parsed.companyName,
+    name: parsed.founderName,
+    email: founderEmailInput || existing?.email || `unknown+${Date.now()}@placeholder.local`,
+    incubatorId: cohortId ?? existing?.incubatorId ?? null,
+    vision: parsed.vision ?? existing?.vision ?? null,
+    deckUrl: parsed.deckUrl ?? existing?.deckUrl ?? null,
+    sprintHost: parsed.sprintHost ?? existing?.sprintHost ?? null,
+    coHost: parsed.coHost ?? existing?.coHost ?? null,
+    keyStrength: parsed.keyStrengths ?? existing?.keyStrength ?? null,
+    gap: parsed.gaps ?? existing?.gap ?? null,
+    mentorRecommendation: parsed.mentorRecommendation ?? existing?.mentorRecommendation ?? null,
+    marketAccess: parsed.marketAccess ?? existing?.marketAccess ?? null,
+    excelData: parsed.raw as any,
+    stageWorkflow: parsed.detectedStage === "sprint_done"
+      ? (existing?.stageWorkflow === "post_email_sent" ? existing.stageWorkflow : "sprint_done")
+      : (existing?.stageWorkflow ?? "pre_sprint"),
+    ownerId: userId,
+    source: sourceSheetUrl ? "google_sheets_sync" : "sprint_template_upload",
+    sourceSheetUrl: sourceSheetUrl ?? existing?.sourceSheetUrl ?? null,
+  };
+
+  let companyId: number;
+  if (existing) {
+    const [updated] = await db.update(foundersTable)
+      .set(payload)
+      .where(eq(foundersTable.id, existing.id))
+      .returning();
+    companyId = updated.id;
+  } else {
+    const [created] = await db.insert(foundersTable).values(payload).returning();
+    companyId = created.id;
+  }
+
+  await db.insert(companyEventsTable).values({
+    founderId: companyId,
+    userId,
+    kind: "template_uploaded",
+    note: existing ? `${noteVerb} from "${sourceLabel}"` : `${noteVerb} from "${sourceLabel}"`,
+    metadata: { detectedStage: parsed.detectedStage, warnings: parsed.warnings, sourceSheetUrl: sourceSheetUrl ?? undefined },
+  });
+
+  return { companyId, isNew: !existing };
+}
+
+// ─── POST /companies/upload-template — file upload (kept for back-compat) ─
 router.post("/companies/upload-template", upload.single("file"), async (req, res) => {
   const userId = await requireUser(req, res); if (!userId) return;
   if (!req.file) { res.status(400).json({ error: "No file uploaded" }); return; }
@@ -162,101 +249,159 @@ router.post("/companies/upload-template", upload.single("file"), async (req, res
   try {
     parsed = parseSprintTemplate(req.file.buffer);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Could not parse template";
-    res.status(400).json({ error: msg });
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not parse template" });
     return;
   }
 
-  const cohortName = (req.body?.cohortOverride?.trim() || parsed.cohort?.trim() || "").trim();
-  // Priority: manual form field > parsed Excel value > existing row's email > placeholder.
-  const founderEmailInput = (req.body?.founderEmail?.trim() || parsed.founderEmail?.trim() || "").trim();
-
   try {
-    // ── 2. Find or create the cohort ──────────────────────────────────────
-    let cohortId: number | null = null;
-    if (cohortName) {
-      const [existingCohort] = await db.select().from(incubatorsTable)
-        .where(sql`LOWER(${incubatorsTable.name}) = LOWER(${cohortName})`)
-        .limit(1);
-      if (existingCohort) {
-        cohortId = existingCohort.id;
-      } else {
-        const [created] = await db.insert(incubatorsTable).values({
-          name: cohortName,
-          type: "incubator",  // legacy required column — generic value
-          description: `Auto-created from Sprint Template upload`,
-        }).returning();
-        cohortId = created.id;
-      }
-    }
-
-    // ── 3. Find or create the founder/company row ────────────────────────
-    // Matching key: companyName + ownerId. This means each consultant has
-    // their own copy of a company even if multiple consultants work on the
-    // same startup — which is the safer default for our access model.
-    const [existing] = await db.select().from(foundersTable)
-      .where(and(
-        sql`LOWER(${foundersTable.companyName}) = LOWER(${parsed.companyName})`,
-        eq(foundersTable.ownerId, userId),
-      ))
-      .limit(1);
-
-    // Build the merge payload: only overwrite if the new value exists.
-    const payload = {
-      companyName: parsed.companyName,
-      name: parsed.founderName,
-      email: founderEmailInput || existing?.email || `unknown+${Date.now()}@placeholder.local`,
-      incubatorId: cohortId ?? existing?.incubatorId ?? null,
-      vision: parsed.vision ?? existing?.vision ?? null,
-      deckUrl: parsed.deckUrl ?? existing?.deckUrl ?? null,
-      sprintHost: parsed.sprintHost ?? existing?.sprintHost ?? null,
-      coHost: parsed.coHost ?? existing?.coHost ?? null,
-      keyStrength: parsed.keyStrengths ?? existing?.keyStrength ?? null,
-      gap: parsed.gaps ?? existing?.gap ?? null,
-      mentorRecommendation: parsed.mentorRecommendation ?? existing?.mentorRecommendation ?? null,
-      marketAccess: parsed.marketAccess ?? existing?.marketAccess ?? null,
-      excelData: parsed.raw as any,
-      // Only advance stage forward, never backward.
-      stageWorkflow: parsed.detectedStage === "sprint_done"
-        ? (existing?.stageWorkflow === "post_email_sent" ? existing.stageWorkflow : "sprint_done")
-        : (existing?.stageWorkflow ?? "pre_sprint"),
-      ownerId: userId,
-      source: "sprint_template_upload",
-    };
-
-    let companyId: number;
-    if (existing) {
-      const [updated] = await db.update(foundersTable)
-        .set(payload)
-        .where(eq(foundersTable.id, existing.id))
-        .returning();
-      companyId = updated.id;
-    } else {
-      const [created] = await db.insert(foundersTable).values(payload).returning();
-      companyId = created.id;
-    }
-
-    // ── 4. Log the upload event ───────────────────────────────────────────
-    await db.insert(companyEventsTable).values({
-      founderId: companyId,
+    const { companyId, isNew } = await ingestParsedTemplate({
       userId,
-      kind: "template_uploaded",
-      note: existing
-        ? `Re-uploaded "${req.file.originalname}"`
-        : `Uploaded "${req.file.originalname}"`,
-      metadata: { detectedStage: parsed.detectedStage, warnings: parsed.warnings },
-    });
-
-    res.json({
-      companyId,
-      isNew: !existing,
-      detectedStage: parsed.detectedStage,
       parsed,
-      warnings: parsed.warnings,
+      cohortOverride: req.body?.cohortOverride,
+      founderEmailOverride: req.body?.founderEmail,
+      sourceSheetUrl: null,
+      noteVerb: req.body?.cohortOverride ? "Re-uploaded" : "Uploaded",
+      sourceLabel: req.file.originalname,
     });
+    res.json({ companyId, isNew, detectedStage: parsed.detectedStage, parsed, warnings: parsed.warnings });
   } catch (err) {
     req.log.error({ err }, "Failed to upload template");
     res.status(500).json({ error: "Failed to upload template" });
+  }
+});
+
+// ─── POST /companies/ingest-sheet — Google Sheets URL ingestion ──────────
+/**
+ * Body: { sheetUrl: string, cohortOverride?: string, founderEmail?: string }
+ * Pulls the sheet via the user's connected Google account, parses with the
+ * same logic as the file uploader, and saves the URL so future Re-syncs
+ * don't need the consultant to paste it again.
+ */
+router.post("/companies/ingest-sheet", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const sheetUrl = String(req.body?.sheetUrl ?? "").trim();
+  if (!sheetUrl) { res.status(400).json({ error: "sheetUrl required" }); return; }
+
+  if (!extractSheetId(sheetUrl)) {
+    res.status(400).json({ error: "That doesn't look like a Google Sheets URL." });
+    return;
+  }
+
+  try {
+    const wb = await fetchSheetAsWorkbook(userId, sheetUrl);
+    const parsed = parseSprintTemplateWorkbook(wb);
+
+    const { companyId, isNew } = await ingestParsedTemplate({
+      userId,
+      parsed,
+      cohortOverride: req.body?.cohortOverride,
+      founderEmailOverride: req.body?.founderEmail,
+      sourceSheetUrl: sheetUrl,
+      noteVerb: "Synced",
+      sourceLabel: "Google Sheet",
+    });
+
+    res.json({ companyId, isNew, detectedStage: parsed.detectedStage, parsed, warnings: parsed.warnings });
+  } catch (err) {
+    req.log.error({ err }, "Failed to ingest sheet");
+    const msg = err instanceof Error ? err.message : "Failed to ingest sheet";
+    // 400 for user-fixable errors (bad URL, no access), 500 for server errors
+    const code = /access|expired|not connected|empty|URL|Founder|Company/i.test(msg) ? 400 : 500;
+    res.status(code).json({ error: msg });
+  }
+});
+
+// ─── POST /companies/:id/resync — re-pull from saved Sheets URL ──────────
+router.post("/companies/:id/resync", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [c] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    if (!c) { res.status(404).json({ error: "Company not found" }); return; }
+    if (c.ownerId && c.ownerId !== userId) { res.status(403).json({ error: "Not authorized" }); return; }
+    if (!c.sourceSheetUrl) {
+      res.status(400).json({ error: "No source sheet URL saved for this company. Use ingest-sheet first." });
+      return;
+    }
+
+    const wb = await fetchSheetAsWorkbook(userId, c.sourceSheetUrl);
+    const parsed = parseSprintTemplateWorkbook(wb);
+
+    const { companyId } = await ingestParsedTemplate({
+      userId,
+      parsed,
+      sourceSheetUrl: c.sourceSheetUrl,
+      noteVerb: "Re-synced",
+      sourceLabel: "Google Sheet",
+    });
+
+    res.json({ companyId, detectedStage: parsed.detectedStage, parsed, warnings: parsed.warnings });
+  } catch (err) {
+    req.log.error({ err }, "Failed to resync");
+    const msg = err instanceof Error ? err.message : "Failed to resync";
+    const code = /access|expired|not connected|empty|URL|Founder|Company/i.test(msg) ? 400 : 500;
+    res.status(code).json({ error: msg });
+  }
+});
+
+// ─── PATCH /companies/:id — inline edit ──────────────────────────────────
+/**
+ * Body: { companyName?, founderName?, founderEmail?, cohortName?, deckUrl?,
+ *         sprintHost?, coHost? }
+ * Cohort is given by NAME, not ID — we find-or-create the same way ingestion
+ * does. This lets the consultant rename or move a company between cohorts
+ * without round-tripping through the upload flow.
+ */
+router.patch("/companies/:id", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [c] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    if (!c) { res.status(404).json({ error: "Company not found" }); return; }
+    if (c.ownerId && c.ownerId !== userId) { res.status(403).json({ error: "Not authorized" }); return; }
+
+    // Translate cohortName → cohortId (find-or-create), if provided
+    let nextCohortId: number | null | undefined = undefined;
+    const cohortName = req.body?.cohortName != null ? String(req.body.cohortName).trim() : undefined;
+    if (cohortName !== undefined) {
+      if (cohortName === "") {
+        nextCohortId = null;  // explicit clear
+      } else {
+        const [existing] = await db.select().from(incubatorsTable)
+          .where(sql`LOWER(${incubatorsTable.name}) = LOWER(${cohortName})`)
+          .limit(1);
+        if (existing) nextCohortId = existing.id;
+        else {
+          const [created] = await db.insert(incubatorsTable).values({
+            name: cohortName, type: "incubator", description: "Created via company edit",
+          }).returning();
+          nextCohortId = created.id;
+        }
+      }
+    }
+
+    const patch: Record<string, unknown> = {};
+    if (req.body?.companyName != null)  patch.companyName  = String(req.body.companyName).trim();
+    if (req.body?.founderName != null)  patch.name         = String(req.body.founderName).trim();
+    if (req.body?.founderEmail != null) patch.email        = String(req.body.founderEmail).trim() || c.email;
+    if (req.body?.deckUrl != null)      patch.deckUrl      = String(req.body.deckUrl).trim() || null;
+    if (req.body?.sprintHost != null)   patch.sprintHost   = String(req.body.sprintHost).trim() || null;
+    if (req.body?.coHost != null)       patch.coHost       = String(req.body.coHost).trim() || null;
+    if (nextCohortId !== undefined)     patch.incubatorId  = nextCohortId;
+
+    if (Object.keys(patch).length === 0) {
+      res.status(400).json({ error: "Nothing to update" }); return;
+    }
+
+    await db.update(foundersTable).set(patch).where(eq(foundersTable.id, id));
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Failed to edit company");
+    res.status(500).json({ error: "Failed to edit company" });
   }
 });
 
@@ -323,7 +468,7 @@ router.post("/companies/:id/events", async (req, res) => {
   }
 });
 
-// ─── DELETE /companies/:id — let the consultant remove a stale upload ────
+// ─── DELETE /companies/:id — permanent delete with cascade cleanup ────
 router.delete("/companies/:id", async (req, res) => {
   const userId = await requireUser(req, res); if (!userId) return;
   const id = Number(req.params.id);
@@ -333,12 +478,25 @@ router.delete("/companies/:id", async (req, res) => {
     const [c] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
     if (!c) { res.status(404).json({ error: "Company not found" }); return; }
     if (c.ownerId && c.ownerId !== userId) {
-      // Admins can delete anything; consultants only their own.
       const [me] = await db.select().from(usersTable).where(eq(usersTable.id, userId)).limit(1);
       if (me?.role !== "admin") { res.status(403).json({ error: "Not authorized" }); return; }
     }
+
+    // Explicit cleanup of child rows. The FK constraints declared in the
+    // schema also cascade, but doing it explicitly lets us return counts
+    // to the UI so the toast can say "Deleted ABC + 3 events + 2 drafts".
+    const drafts = await db.delete(emailDraftsTable)
+      .where(eq(emailDraftsTable.founderId, id))
+      .returning({ id: emailDraftsTable.id });
+    const events = await db.delete(companyEventsTable)
+      .where(eq(companyEventsTable.founderId, id))
+      .returning({ id: companyEventsTable.id });
     await db.delete(foundersTable).where(eq(foundersTable.id, id));
-    res.json({ ok: true });
+
+    res.json({
+      ok: true,
+      deleted: { events: events.length, drafts: drafts.length },
+    });
   } catch (err) {
     req.log.error({ err }, "Failed to delete company");
     res.status(500).json({ error: "Failed to delete company" });

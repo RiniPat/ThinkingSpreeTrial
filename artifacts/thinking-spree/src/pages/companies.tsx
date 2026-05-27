@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
@@ -6,8 +6,8 @@ import { Layout } from "@/components/Layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Upload, FileSpreadsheet, Building2, ChevronRight, AlertCircle,
-  CheckCircle2, Mail, Loader2, Search, ExternalLink, Plus,
+  Link2, FileSpreadsheet, Building2, ChevronRight, AlertCircle,
+  CheckCircle2, Mail, Loader2, Search, ExternalLink, Trash2,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -59,10 +59,11 @@ function StageChip({ stage }: { stage: Company["stageWorkflow"] }) {
 export default function CompaniesPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [dragOver, setDragOver] = useState(false);
+  const [sheetUrl, setSheetUrl] = useState("");
   const [search, setSearch] = useState("");
   const [pendingResult, setPendingResult] = useState<UploadResult | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: number; name: string } | null>(null);
+  const [deleteText, setDeleteText] = useState("");
 
   const { data, isLoading } = useQuery<{ companies: Company[] }>({
     queryKey: ["companies"],
@@ -71,27 +72,27 @@ export default function CompaniesPage() {
   });
 
   /**
-   * Upload mutation. multipart/form-data, hits /api/companies/upload-template,
-   * shows a result toast + opens a small "what next" panel for the consultant.
+   * Sheet ingest mutation. Server pulls the Google Sheet via the consultant's
+   * OAuth token, parses it, and creates/updates the company. We get back the
+   * same result shape as the old file upload, so downstream UI is unchanged.
    */
-  const uploadMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const form = new FormData();
-      form.append("file", file);
-      // We rely on the server to read the cohort from the Excel — no override yet.
-      const res = await fetch(`${BASE}/api/companies/upload-template`, {
+  const ingestMutation = useMutation({
+    mutationFn: async (url: string) => {
+      const res = await fetch(`${BASE}/api/companies/ingest-sheet`, {
         method: "POST",
         credentials: "include",
-        body: form,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sheetUrl: url }),
       });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody?.error || `Upload failed (${res.status})`);
+        throw new Error(errBody?.error || `Sync failed (${res.status})`);
       }
       return (await res.json()) as UploadResult;
     },
     onSuccess: (result) => {
       setPendingResult(result);
+      setSheetUrl("");
       qc.invalidateQueries({ queryKey: ["companies"] });
       toast({
         title: result.isNew ? "Company created" : "Company updated",
@@ -99,17 +100,44 @@ export default function CompaniesPage() {
       });
     },
     onError: (err: any) => {
-      toast({ title: "Upload failed", description: err.message, variant: "destructive" });
+      toast({ title: "Sheet sync failed", description: err.message, variant: "destructive" });
     },
   });
 
-  function handleFile(file: File | null) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".xlsx")) {
-      toast({ title: "Wrong file type", description: "Please upload an .xlsx file", variant: "destructive" });
+  // Delete mutation with confirmation
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`${BASE}/api/companies/${id}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e?.error || "Delete failed");
+      }
+      return res.json();
+    },
+    onSuccess: (data, id) => {
+      const name = confirmDelete?.name ?? "Company";
+      const events = data?.deleted?.events ?? 0;
+      const drafts = data?.deleted?.drafts ?? 0;
+      toast({
+        title: "Company deleted",
+        description: `${name} removed${events || drafts ? ` (${events} timeline events · ${drafts} email drafts cleaned up)` : ""}`,
+      });
+      setConfirmDelete(null);
+      setDeleteText("");
+      qc.invalidateQueries({ queryKey: ["companies"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  function handleSync() {
+    const url = sheetUrl.trim();
+    if (!url) {
+      toast({ title: "Paste a Google Sheets URL first", variant: "destructive" });
       return;
     }
-    uploadMutation.mutate(file);
+    ingestMutation.mutate(url);
   }
 
   // Group companies by cohort, with "Uncategorised" as a fallback bucket.
@@ -143,62 +171,63 @@ export default function CompaniesPage() {
             <div className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Workspace</div>
             <h1 className="mt-2 font-serif text-4xl text-foreground">Companies</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Upload a Sprint Template to add or update a company. Companies are grouped by cohort.
+              Paste a Google Sheets link to add or update a company. Companies are grouped by cohort.
             </p>
           </div>
         </section>
 
-        {/* Upload zone */}
-        <section
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragOver(false);
-            const f = e.dataTransfer.files?.[0];
-            if (f) handleFile(f);
-          }}
-          className={
-            "relative rounded-xl border-2 border-dashed p-8 text-center transition-colors " +
-            (dragOver
-              ? "border-primary bg-primary/5"
-              : "border-border bg-card hover:border-muted-foreground/30")
-          }
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            className="hidden"
-            onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
-          />
-          {uploadMutation.isPending ? (
-            <div className="flex flex-col items-center gap-2">
-              <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <p className="text-sm text-foreground">Parsing template...</p>
+        {/* Sheet URL ingest zone */}
+        <section className="rounded-xl border border-border bg-card p-6">
+          <div className="flex items-start gap-4">
+            <div className="hidden sm:flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 flex-shrink-0">
+              <FileSpreadsheet className="h-6 w-6 text-primary" />
             </div>
-          ) : (
-            <>
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
-                <FileSpreadsheet className="h-6 w-6 text-primary" />
-              </div>
-              <h2 className="mt-3 font-serif text-2xl text-foreground">Upload Sprint Template</h2>
+            <div className="min-w-0 flex-1">
+              <h2 className="font-serif text-2xl text-foreground">Link a Google Sheet</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                Drop a filled <code className="px-1 py-0.5 bg-muted rounded text-xs">.xlsx</code> file here,
-                or click below to browse.
+                Paste the URL of your filled Sprint Template Google Sheet.
+                It must be shared with your Google account (any access ≥ Viewer)
+                or set to "Anyone with the link".
               </p>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 transition"
-              >
-                <Upload className="h-4 w-4" />
-                Choose File
-              </button>
-              <p className="mt-3 text-[11px] text-muted-foreground">
-                Required fields: Company Name, Founder's Name. Cohort &amp; deck link recommended.
+
+              <div className="mt-4 flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-1">
+                  <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <input
+                    type="url"
+                    value={sheetUrl}
+                    onChange={(e) => setSheetUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSync(); }}
+                    placeholder="https://docs.google.com/spreadsheets/d/1Abc.../edit"
+                    disabled={ingestMutation.isPending}
+                    className="w-full pl-9 pr-4 py-2.5 bg-background border border-input rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition disabled:opacity-60"
+                  />
+                </div>
+                <button
+                  onClick={handleSync}
+                  disabled={ingestMutation.isPending || !sheetUrl.trim()}
+                  className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap"
+                >
+                  {ingestMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Syncing…
+                    </>
+                  ) : (
+                    <>
+                      <FileSpreadsheet className="h-4 w-4" />
+                      Pull Data from Sheet
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Required sheet tabs: <strong>Overview</strong>. Required fields: Company Name, Founder's Name.
+                Other tabs (SWOT, Funding, etc.) are read automatically if filled.
               </p>
-            </>
-          )}
+            </div>
+          </div>
         </section>
 
         {/* Recent upload result panel */}
@@ -273,7 +302,10 @@ export default function CompaniesPage() {
                 </header>
                 <ul className="divide-y divide-border">
                   {companies.map(c => (
-                    <li key={c.id}>
+                    <li key={c.id} className="relative group">
+                      {/* Row content is wrapped in a Link, but the delete button
+                          intercepts the click via stopPropagation so it doesn't
+                          bubble up and navigate the user away. */}
                       <Link href={`/companies/${c.id}`}>
                         <a className="flex items-center gap-5 px-6 py-4 transition-colors hover:bg-muted/30 cursor-pointer">
                           <div className="min-w-0 flex-1">
@@ -292,9 +324,26 @@ export default function CompaniesPage() {
                             </div>
                           </div>
                           <StageChip stage={c.stageWorkflow} />
+                          {/* Reserve space for the delete button so the chip
+                              doesn't jump when hovering. */}
+                          <span className="w-8" />
                           <ChevronRight className="h-4 w-4 text-muted-foreground" />
                         </a>
                       </Link>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setConfirmDelete({ id: c.id, name: c.companyName });
+                          setDeleteText("");
+                        }}
+                        className="absolute right-14 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted-foreground opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
+                        aria-label={`Delete ${c.companyName}`}
+                        title="Delete company"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -304,9 +353,87 @@ export default function CompaniesPage() {
         )}
 
         <footer className="pt-2 text-center text-xs text-muted-foreground">
-          Thinking Spree · Consultant Suite v4.2
+          Thinking Spree · Consultant Suite v4.4
         </footer>
       </main>
+
+      {/* Delete confirmation dialog — requires typing "DELETE" to confirm.
+          The two-step UX is intentional: this action is irreversible and
+          cascades to email drafts + timeline events. */}
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(15, 23, 42, 0.55)", backdropFilter: "blur(4px)" }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !deleteMutation.isPending) {
+              setConfirmDelete(null);
+              setDeleteText("");
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-border bg-card shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-start gap-3 border-b border-border px-6 py-4">
+              <div className="rounded-md bg-destructive/10 p-2 flex-shrink-0">
+                <AlertCircle className="h-5 w-5 text-destructive" />
+              </div>
+              <div>
+                <h2 className="font-serif text-xl text-foreground">Delete company permanently?</h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  This cannot be undone.
+                </p>
+              </div>
+            </header>
+            <div className="px-6 py-4 space-y-3 text-sm text-foreground">
+              <p>
+                You're about to delete <strong>{confirmDelete.name}</strong>. This will also
+                remove:
+              </p>
+              <ul className="list-disc pl-5 text-muted-foreground space-y-1">
+                <li>All timeline events (uploads, sends, completions)</li>
+                <li>All saved email drafts for this company</li>
+                <li>All parsed sprint data</li>
+              </ul>
+              <p className="text-xs text-muted-foreground">
+                Type <span className="font-mono font-semibold text-foreground">DELETE</span> below to confirm.
+              </p>
+              <input
+                type="text"
+                value={deleteText}
+                onChange={(e) => setDeleteText(e.target.value)}
+                placeholder="DELETE"
+                autoFocus
+                disabled={deleteMutation.isPending}
+                className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-destructive/30 focus:border-destructive font-mono"
+              />
+            </div>
+            <footer className="flex items-center justify-end gap-2 border-t border-border px-6 py-3 bg-muted/30">
+              <button
+                onClick={() => {
+                  if (!deleteMutation.isPending) {
+                    setConfirmDelete(null);
+                    setDeleteText("");
+                  }
+                }}
+                disabled={deleteMutation.isPending}
+                className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteMutation.mutate(confirmDelete.id)}
+                disabled={deleteMutation.isPending || deleteText !== "DELETE"}
+                className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {deleteMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                Delete permanently
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </Layout>
   );
 }

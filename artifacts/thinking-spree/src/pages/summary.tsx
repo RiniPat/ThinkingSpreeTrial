@@ -59,12 +59,25 @@ function AddIncubatorModal({ onClose }: { onClose: () => void }) {
             <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
               Type <span className="text-destructive">*</span>
             </label>
-            <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
-              className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition">
+            {/* Typeable combobox: pick from suggestions or type a new one.
+                We use a <datalist> + plain <input> so existing form state
+                handling keeps working — no extra deps needed. */}
+            <input
+              list="incubator-type-suggestions"
+              value={form.type}
+              onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+              placeholder="e.g. ISB, JU, Wadhwani, Ashoka, or any new program"
+              className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition"
+            />
+            <datalist id="incubator-type-suggestions">
               <option value="isb">ISB</option>
               <option value="ju">JU</option>
-            </select>
-            <p className="text-[11px] text-muted-foreground mt-1">Only ISB and JU programs are tracked on the Summary page.</p>
+              <option value="wadhwani">Wadhwani</option>
+              <option value="ashoka">Ashoka</option>
+            </datalist>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Pick a suggestion or type any incubator name. Lowercase is recommended for consistency.
+            </p>
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">

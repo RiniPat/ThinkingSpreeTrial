@@ -12,6 +12,7 @@ import adminImportRouter from "./admin-import";
 import aiAutomationRouter from "./ai-automation";
 import companiesRouter from "./companies";
 import companyEmailsRouter from "./companyEmails";
+import dashboardStatsRouter from "./dashboardStats";
 
 const router: IRouter = Router();
 
@@ -28,5 +29,6 @@ router.use(adminImportRouter);
 router.use(aiAutomationRouter);
 router.use(companiesRouter);
 router.use(companyEmailsRouter);
+router.use(dashboardStatsRouter);
 
 export default router;

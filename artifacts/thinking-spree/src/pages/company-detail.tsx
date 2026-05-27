@@ -5,10 +5,12 @@ import { customFetch } from "@workspace/api-client-react";
 import { Layout } from "@/components/Layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmailComposer } from "@/components/EmailComposer";
+import { EditCompanyDialog } from "@/components/EditCompanyDialog";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, Building2, User, Mail, ExternalLink, Sparkles, Send, CheckCircle2,
   Clock, Circle, AlertCircle, Upload, Save, Loader2, Calendar, FileText, ChevronRight,
+  Pencil, RefreshCw, Trash2, X,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
@@ -28,6 +30,7 @@ type Company = {
   cohortName: string | null;
   deckUrl: string | null;
   thinkingSheetUrl: string | null;
+  sourceSheetUrl: string | null;
   vision: string | null;
   stageWorkflow: Stage;
   sprintHost: string | null;
@@ -209,6 +212,9 @@ export default function CompanyDetailPage() {
   const [tab, setTab] = useState<"overview" | "sprint" | "timeline">("overview");
   const [editingEmail, setEditingEmail] = useState(false);
   const [composer, setComposer] = useState<{ open: boolean; kind: "pre" | "post" }>({ open: false, kind: "pre" });
+  const [editOpen, setEditOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteText, setDeleteText] = useState("");
 
   const { data, isLoading, refetch } = useQuery<{ company: Company; events: CompanyEvent[] }>({
     queryKey: ["company", id],
@@ -254,6 +260,37 @@ export default function CompanyDetailPage() {
       qc.invalidateQueries({ queryKey: ["company", id] });
     },
     onError: (err: any) => toast({ title: "Failed", description: err.message, variant: "destructive" }),
+  });
+
+  // Re-pull from the originally-linked Google Sheet
+  const resyncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${BASE}/api/companies/${id}/resync`, {
+        method: "POST", credentials: "include",
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Re-sync failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Synced from Google Sheet", description: "Latest data pulled successfully." });
+      qc.invalidateQueries({ queryKey: ["company", id] });
+    },
+    onError: (err: any) => toast({ title: "Sync failed", description: err.message, variant: "destructive" }),
+  });
+
+  // Delete the entire company (cascades to drafts + events)
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${BASE}/api/companies/${id}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) throw new Error((await res.json()).error || "Delete failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Company deleted" });
+      qc.invalidateQueries({ queryKey: ["companies"] });
+      setLocation("/companies");
+    },
+    onError: (err: any) => toast({ title: "Delete failed", description: err.message, variant: "destructive" }),
   });
 
   if (!Number.isFinite(id)) return <Layout><div className="p-10">Invalid company ID</div></Layout>;
@@ -362,15 +399,35 @@ export default function CompanyDetailPage() {
                   <Sparkles className="h-3.5 w-3.5" />
                   Generate Post-Sprint Email
                 </button>
-                <Link href="/companies">
-                  <a className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted">
-                    <Upload className="h-3.5 w-3.5" />
-                    Re-upload Template
-                  </a>
-                </Link>
+                {c.sourceSheetUrl && (
+                  <button
+                    onClick={() => resyncMutation.mutate()}
+                    disabled={resyncMutation.isPending}
+                    className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-60"
+                    title="Pull latest data from the linked Google Sheet"
+                  >
+                    {resyncMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    Re-sync from Sheet
+                  </button>
+                )}
+                <button
+                  onClick={() => setEditOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Edit
+                </button>
+                <button
+                  onClick={() => { setConfirmDelete(true); setDeleteText(""); }}
+                  className="inline-flex items-center gap-2 rounded-md border border-destructive/30 bg-card px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete
+                </button>
               </div>
               <div className="text-[11px] text-muted-foreground">
                 Workflow: <span className="font-medium text-foreground">{c.stageWorkflow.replace(/_/g, " ")}</span>
+                {c.sourceSheetUrl && <> · <a href={c.sourceSheetUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">Linked sheet</a></>}
               </div>
             </div>
           </div>
@@ -434,7 +491,7 @@ export default function CompanyDetailPage() {
         )}
 
         <footer className="pt-2 text-center text-xs text-muted-foreground">
-          Thinking Spree · Consultant Suite v4.3
+          Thinking Spree · Consultant Suite v4.4
         </footer>
       </main>
 
@@ -449,6 +506,80 @@ export default function CompanyDetailPage() {
         onClose={() => setComposer({ ...composer, open: false })}
         onSent={() => qc.invalidateQueries({ queryKey: ["company", id] })}
       />
+
+      {/* Edit dialog */}
+      <EditCompanyDialog
+        companyId={id}
+        open={editOpen}
+        initial={{
+          companyName: c.companyName,
+          founderName: c.founderName,
+          founderEmail: c.founderEmail,
+          cohortName: c.cohortName,
+          deckUrl: c.deckUrl,
+          sprintHost: c.sprintHost,
+          coHost: c.coHost,
+        }}
+        onClose={() => setEditOpen(false)}
+      />
+
+      {/* Delete confirmation dialog — identical UX to the one on /companies */}
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(15, 23, 42, 0.55)", backdropFilter: "blur(4px)" }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !deleteMutation.isPending) {
+              setConfirmDelete(false); setDeleteText("");
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-border bg-card shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-start gap-3 border-b border-border px-6 py-4">
+              <div className="rounded-md bg-destructive/10 p-2 flex-shrink-0">
+                <AlertCircle className="h-5 w-5 text-destructive" />
+              </div>
+              <div>
+                <h2 className="font-serif text-xl text-foreground">Delete company permanently?</h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">This cannot be undone.</p>
+              </div>
+            </header>
+            <div className="px-6 py-4 space-y-3 text-sm text-foreground">
+              <p>You're about to delete <strong>{c.companyName}</strong>. This will also remove all timeline events and email drafts for this company.</p>
+              <p className="text-xs text-muted-foreground">Type <span className="font-mono font-semibold text-foreground">DELETE</span> below to confirm.</p>
+              <input
+                type="text"
+                value={deleteText}
+                onChange={(e) => setDeleteText(e.target.value)}
+                placeholder="DELETE"
+                autoFocus
+                disabled={deleteMutation.isPending}
+                className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-destructive/30 focus:border-destructive font-mono"
+              />
+            </div>
+            <footer className="flex items-center justify-end gap-2 border-t border-border px-6 py-3 bg-muted/30">
+              <button
+                onClick={() => { if (!deleteMutation.isPending) { setConfirmDelete(false); setDeleteText(""); } }}
+                disabled={deleteMutation.isPending}
+                className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteMutation.mutate()}
+                disabled={deleteMutation.isPending || deleteText !== "DELETE"}
+                className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {deleteMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                Delete permanently
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </Layout>
   );
 }

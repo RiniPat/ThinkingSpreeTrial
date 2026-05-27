@@ -1,5 +1,5 @@
 import {
-  useGetStatsOverview, useListSprints, useGetMe,
+  useGetMe,
   customFetch,
 } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -93,7 +93,21 @@ function StatCard({ label, value, delta, trend, tone = "neutral" }: {
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
-  const { data: stats, isLoading: statsLoading } = useGetStatsOverview();
+
+  // New monthly stats endpoint — driven by Google Calendar "T-Sprint for..."
+  // events + the email_drafts table. Replaces the legacy /stats/overview
+  // which counted from the sprintsTable.
+  type DashStats = {
+    myTSprints: number; scheduled: number; completed: number; completionRate: number;
+    emailsSentMonth: number; upcomingThisWeek: number;
+    sprintEvents: { id: string; title: string; startISO: string; endISO: string; isPast: boolean }[];
+  };
+  const { data: stats, isLoading: statsLoading } = useQuery<DashStats>({
+    queryKey: ["/api/stats/dashboard"],
+    queryFn: () => customFetch<DashStats>(`${BASE}/api/stats/dashboard`, { credentials: "include" }),
+    staleTime: 30_000,
+  });
+
   // 7-day window of Google Calendar events so the dashboard reflects the
   // consultant's upcoming week. Raw query because the generated client
   // doesn't expose the `days` param.
@@ -104,26 +118,25 @@ export default function DashboardPage() {
   });
   const events = calendarQuery.data;
   const eventsLoading = calendarQuery.isLoading;
-  const { data: sprints, isLoading: sprintsLoading } = useListSprints();
   const { data: user } = useGetMe();
 
-  // Sprints come back already scoped to this user from the backend.
-  // We show the 5 most recent (already DESC sorted server-side).
-  const recentSprints = sprints?.slice(0, 5) ?? [];
   const today = format(new Date(), "EEEE · d MMMM yyyy").toUpperCase();
   const firstName = user?.name?.split(" ")[0] ?? "there";
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
-  // Pipeline composition for the right-rail bars. We derive what we can from
-  // the stats overview; if stats aren't loaded yet, the bars render at 0.
-  const totalSprints = stats?.totalSprints ?? 0;
-  const pct = (n: number) => totalSprints > 0 ? Math.round((n / totalSprints) * 100) : 0;
+  // Pipeline composition for the right-rail bars — now driven by monthly stats.
+  const myTotal = stats?.myTSprints ?? 0;
+  const pct = (n: number) => myTotal > 0 ? Math.round((n / myTotal) * 100) : 0;
   const pipeline = [
-    { stage: "Scheduled",  count: stats?.scheduledSprints ?? 0, pct: pct(stats?.scheduledSprints ?? 0) },
+    { stage: "Scheduled",  count: stats?.scheduled ?? 0,       pct: pct(stats?.scheduled ?? 0) },
     { stage: "This Week",  count: stats?.upcomingThisWeek ?? 0, pct: pct(stats?.upcomingThisWeek ?? 0) },
-    { stage: "Completed",  count: stats?.completedSprints ?? 0, pct: pct(stats?.completedSprints ?? 0) },
+    { stage: "Completed",  count: stats?.completed ?? 0,        pct: pct(stats?.completed ?? 0) },
   ];
+
+  // Recent T-Sprints table now uses the calendar event list from stats.
+  const recentSprints = (stats?.sprintEvents ?? []).slice(0, 5);
+  const sprintsLoading = statsLoading;
 
   return (
     <Layout>
@@ -148,19 +161,27 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* Stats — 4 columns on xl, mirrors the lovable layout. */}
+        {/* Stats — 4 cards driven by Google Calendar (T-Sprint for...) +
+            email_drafts.sent_at. All values are scoped to the current
+            calendar month, refreshed every 30s. */}
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {statsLoading ? (
             Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)
           ) : (
             <>
-              <StatCard label="My T-Sprints"      value={stats?.totalSprints ?? 0}        trend="Total assigned to me" />
-              <StatCard label="Scheduled"         value={stats?.scheduledSprints ?? 0}    trend="Upcoming sessions" />
+              <StatCard label="My T-Sprints"
+                        value={stats?.myTSprints ?? 0}
+                        trend={`From Google Calendar · ${format(new Date(), "MMMM")}`} />
+              <StatCard label="Scheduled"
+                        value={stats?.scheduled ?? 0}
+                        trend="Upcoming this month" />
               <StatCard label="Completion Rate"
-                        value={`${totalSprints > 0 ? Math.round(((stats?.completedSprints ?? 0) / totalSprints) * 100) : 0}%`}
-                        delta={`${stats?.completedSprints ?? 0} done`} tone="up"
-                        trend="Closed sprints" />
-              <StatCard label="Emails This Month" value={stats?.emailsSentThisMonth ?? 0}  trend="Sent from the suite" />
+                        value={`${stats?.completionRate ?? 0}%`}
+                        delta={`${stats?.completed ?? 0} completed`} tone="up"
+                        trend="Post-email sent this month" />
+              <StatCard label="Emails This Month"
+                        value={stats?.emailsSentMonth ?? 0}
+                        trend="Sent from the suite" />
             </>
           )}
         </section>
@@ -270,7 +291,7 @@ export default function DashboardPage() {
               <div>
                 <h2 className="font-serif text-xl text-foreground">Sprint Pipeline</h2>
                 <p className="text-xs text-muted-foreground">
-                  {totalSprints} total · {stats?.totalFounders ?? 0} founders
+                  {myTotal} this month · {stats?.completionRate ?? 0}% completion
                 </p>
               </div>
               <TrendingUp className="h-4 w-4 text-muted-foreground" />
@@ -301,15 +322,18 @@ export default function DashboardPage() {
           </section>
         </div>
 
-        {/* Recent T-Sprints — table layout matches the lovable bottom table */}
+        {/* My T-Sprints this month — straight from Google Calendar.
+            "T-Sprint for ..." event title is the filter. Past events are
+            shown with a Completed/Pending indicator based on the post-email
+            flag in the DB (handled server-side in the stats endpoint). */}
         <section className="rounded-xl border border-card-border bg-card">
           <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-6 py-4">
             <div>
-              <h2 className="font-serif text-xl text-foreground">My Recent T-Sprints</h2>
-              <p className="text-xs text-muted-foreground">Latest assigned to me · sorted newest first</p>
+              <h2 className="font-serif text-xl text-foreground">My T-Sprints This Month</h2>
+              <p className="text-xs text-muted-foreground">From Google Calendar · "T-Sprint for ..."</p>
             </div>
             <Link href="/companies" className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
-              View all <ArrowUpRight size={11} />
+              View companies <ArrowUpRight size={11} />
             </Link>
           </header>
 
@@ -319,53 +343,48 @@ export default function DashboardPage() {
             </div>
           ) : recentSprints.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-sm text-muted-foreground">No T-Sprints assigned to you yet</p>
+              <p className="text-sm text-muted-foreground">No T-Sprint sessions in your calendar this month.</p>
+              <p className="text-[11px] text-muted-foreground/70 mt-1">
+                Tip: name your calendar events "T-Sprint for {"{Company Name}"}" so they appear here.
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-muted/40 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    <th className="px-6 py-3">Venture</th>
-                    <th className="px-4 py-3">Founder</th>
+                    <th className="px-6 py-3">Event Title</th>
                     <th className="px-4 py-3">Date</th>
-                    <th className="px-4 py-3">Host</th>
+                    <th className="px-4 py-3">Time</th>
                     <th className="px-4 py-3">Status</th>
-                    <th className="px-6 py-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {recentSprints.map(sprint => (
-                    <tr
-                      key={sprint.id}
-                      data-testid={`card-sprint-${sprint.id}`}
-                      className="border-b border-border last:border-0 transition-colors hover:bg-muted/30"
-                    >
-                      <td className="px-6 py-4">
-                        <div className="font-medium text-foreground">{sprint.companyName}</div>
-                      </td>
-                      <td className="px-4 py-4 text-muted-foreground">{sprint.founderName}</td>
-                      <td className="px-4 py-4 font-mono text-xs text-muted-foreground">
-                        {sprint.scheduledDate}
-                      </td>
-                      <td className="px-4 py-4 text-muted-foreground">
-                        {sprint.sprintHost && sprint.sprintHost !== sprint.consultantName
-                          ? sprint.sprintHost
-                          : "—"}
-                      </td>
-                      <td className="px-4 py-4">
-                        <StatusChip status={sprint.status} />
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <Link
-                          href={`/sprints/${sprint.id}`}
-                          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                        >
-                          Open <ChevronRight className="h-3 w-3" />
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
+                  {recentSprints.map(ev => {
+                    const start = ev.startISO ? new Date(ev.startISO) : null;
+                    return (
+                      <tr
+                        key={ev.id}
+                        data-testid={`card-sprint-${ev.id}`}
+                        className="border-b border-border last:border-0 transition-colors hover:bg-muted/30"
+                      >
+                        <td className="px-6 py-4">
+                          <div className="font-medium text-foreground">{ev.title}</div>
+                        </td>
+                        <td className="px-4 py-4 font-mono text-xs text-muted-foreground">
+                          {start ? format(start, "d MMM yyyy") : "—"}
+                        </td>
+                        <td className="px-4 py-4 font-mono text-xs text-muted-foreground">
+                          {start ? format(start, "h:mm a") : "—"}
+                        </td>
+                        <td className="px-4 py-4">
+                          {ev.isPast
+                            ? <StatusChip status="completed" />
+                            : <StatusChip status="scheduled" />}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -373,7 +392,7 @@ export default function DashboardPage() {
         </section>
 
         <footer className="pt-2 text-center text-xs text-muted-foreground">
-          Thinking Spree · Consultant Suite v4.1 · Internal use only
+          Thinking Spree · Consultant Suite v4.4 · Internal use only
         </footer>
       </main>
     </Layout>

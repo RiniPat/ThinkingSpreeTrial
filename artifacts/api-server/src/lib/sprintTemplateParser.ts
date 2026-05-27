@@ -139,6 +139,14 @@ function num(s: string | null): number | null {
 
 export function parseSprintTemplate(buffer: Buffer): ParsedTemplate {
   const wb = XLSX.read(buffer, { type: "buffer", cellDates: true, cellNF: false, cellText: true });
+  return parseSprintTemplateWorkbook(wb);
+}
+
+/**
+ * Same parser, but takes an already-built workbook. Used by the Google Sheets
+ * fetcher path so we don't have to serialize through .xlsx → bytes → re-parse.
+ */
+export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
   const warnings: string[] = [];
 
   // Find sheets by approximate name — consultants sometimes rename slightly.
