@@ -119,7 +119,12 @@ router.post("/auth/signup", async (req, res) => {
       return;
     }
     const passwordHash = await bcrypt.hash(password, 10);
-    // First user becomes admin automatically
+    // First user becomes admin automatically.
+    //
+    // Previous version did: `const [{ count }] = await db.select(...).limit(1)` which
+    // destructured `count` from `undefined` on an empty table — the exact case this
+    // check exists to detect. Switched to a proper COUNT(*) aggregate which always
+    // returns one row, even for an empty table, and guard with `?? 0` for safety.
     const countResult = await db.select({ count: sqlCount() }).from(usersTable);
     const userCount = Number(countResult[0]?.count ?? 0);
     const isFirstUser = userCount === 0;

@@ -308,7 +308,7 @@ export default function DashboardPage() {
               <h2 className="font-serif text-xl text-foreground">My Recent T-Sprints</h2>
               <p className="text-xs text-muted-foreground">Latest assigned to me · sorted newest first</p>
             </div>
-            <Link href="/sprints" className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+            <Link href="/companies" className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
               View all <ArrowUpRight size={11} />
             </Link>
           </header>

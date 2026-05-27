@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
-    "typecheck:libs": "tsc --build",
+    "typecheck:libs": "tsc --build --force",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
     "render:build": "pnpm install --frozen-lockfile=false && tsc --build --force && pnpm --filter \"@workspace/thinking-spree\" run build && pnpm --filter \"@workspace/api-server\" run build && pnpm run render:migrate",
     "render:migrate": "node scripts/run-migrations.mjs",

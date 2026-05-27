@@ -10,6 +10,8 @@ import summaryRouter from "./summary";
 import googleRouter from "./google";
 import adminImportRouter from "./admin-import";
 import aiAutomationRouter from "./ai-automation";
+import companiesRouter from "./companies";
+import companyEmailsRouter from "./companyEmails";
 
 const router: IRouter = Router();
 
@@ -24,5 +26,7 @@ router.use(summaryRouter);
 router.use(googleRouter);
 router.use(adminImportRouter);
 router.use(aiAutomationRouter);
+router.use(companiesRouter);
+router.use(companyEmailsRouter);
 
 export default router;

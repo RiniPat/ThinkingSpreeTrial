@@ -7,9 +7,8 @@ import NotFound from "@/pages/not-found";
 import LoginPage from "@/pages/login";
 import SignupPage from "@/pages/signup";
 import DashboardPage from "@/pages/dashboard";
-import VenturesPage from "@/pages/ventures";
-import SprintsPage from "@/pages/sprints";
-import SprintDetailPage from "@/pages/sprint-detail";
+import CompaniesPage from "@/pages/companies";
+import CompanyDetailPage from "@/pages/company-detail";
 import SummaryPage from "@/pages/summary";
 import SprintTrackingPage from "@/pages/sprint-tracking";
 import SettingsPage from "@/pages/settings";
@@ -62,14 +61,18 @@ function Router() {
       <Route path="/dashboard">
         <AuthGuard><DashboardPage /></AuthGuard>
       </Route>
-      <Route path="/ventures">
-        <AuthGuard><VenturesPage /></AuthGuard>
+      <Route path="/companies/:id">
+        <AuthGuard><CompanyDetailPage /></AuthGuard>
       </Route>
+      <Route path="/companies">
+        <AuthGuard><CompaniesPage /></AuthGuard>
+      </Route>
+      {/* Legacy /ventures and /sprints URLs redirect to the new Companies page
+          so bookmarks and old links keep working. */}
+      <Route path="/ventures" component={() => <Redirect to="/companies" />} />
+      <Route path="/sprints" component={() => <Redirect to="/companies" />} />
       <Route path="/sprints/:id">
-        <AuthGuard><SprintDetailPage /></AuthGuard>
-      </Route>
-      <Route path="/sprints">
-        <AuthGuard><SprintsPage /></AuthGuard>
+        {(params: { id: string }) => <Redirect to={`/companies/${params.id}`} />}
       </Route>
       <Route path="/summary">
         <AuthGuard><SummaryPage /></AuthGuard>

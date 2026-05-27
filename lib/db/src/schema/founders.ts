@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, numeric, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, numeric, boolean, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -54,6 +54,26 @@ export const foundersTable = pgTable("founders", {
   // Tracks which import created this row. Filters the Summary page to only
   // the curated founders from ISB/JU summary sheets.
   source: text("source"),
+  // ─── Sprint Template upload workflow (migration 002) ────────────────────
+  // Full parsed Excel content kept as JSON so any future field added to the
+  // template is captured without a schema migration.
+  excelData: jsonb("excel_data"),
+  // Vision pulled from "About Startup" sheet — used as a merge field in
+  // both pre- and post-sprint emails.
+  vision: text("vision"),
+  // Link to the founder's deck attached in the Overview sheet.
+  deckUrl: text("deck_url"),
+  // Where the company currently is in the consultant's flow.
+  // 'pre_sprint'      — uploaded; pre-email not sent yet
+  // 'pre_email_sent'  — pre-sprint email sent; sprint not done
+  // 'sprint_done'     — sprint marked completed; post-email pending
+  // 'post_email_sent' — fully closed out
+  stageWorkflow: text("stage_workflow").notNull().default("pre_sprint"),
+  // Consultant who owns this company (auto-set on upload).
+  ownerId: integer("owner_id"),
+  // Sprint host + co-host names (from Overview sheet); flow into emails.
+  sprintHost: text("sprint_host"),
+  coHost: text("co_host"),
   // -----------------------------------------------------------------------
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

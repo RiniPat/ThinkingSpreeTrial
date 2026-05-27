@@ -4,7 +4,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Briefcase,
-  Zap,
   BarChart3,
   Settings,
   LogOut,
@@ -21,8 +20,7 @@ type NavItem = { href: string; label: string; icon: any; adminOnly?: boolean };
 
 const navItems: NavItem[] = [
   { href: "/dashboard",       label: "Dashboard",       icon: LayoutDashboard },
-  { href: "/ventures",        label: "Ventures",        icon: Briefcase },
-  { href: "/sprints",         label: "T-Sprints",       icon: Zap },
+  { href: "/companies",       label: "Companies",       icon: Briefcase },
   { href: "/summary",         label: "Summary Sheet",   icon: BarChart3 },
   { href: "/sprint-tracking", label: "Sprint Tracking", icon: Activity },
   { href: "/admin/import",    label: "Import Data",     icon: Upload, adminOnly: true },
