@@ -177,7 +177,7 @@ export async function generateEmail(kind: EmailKind, ctx: EmailContext): Promise
   const model = genai.getGenerativeModel({
     // gemini-1.5-flash is fast (~2s) and free-tier eligible. Switch to
     // gemini-1.5-pro for higher quality if quota allows.
-    model: "gemini-1.5-flash",
+    model: "gemini-2.5-flash",
     generationConfig: {
       temperature: 0.7,
       responseMimeType: "application/json",
@@ -228,7 +228,7 @@ export async function summariseVision(input: {
 
   const genai = new GoogleGenerativeAI(apiKey);
   const model = genai.getGenerativeModel({
-    model: "gemini-1.5-flash",
+    model: "gemini-2.5-flash",
     generationConfig: {
       // Lower temperature than email drafting — we want a faithful summary,
       // not creative writing.
