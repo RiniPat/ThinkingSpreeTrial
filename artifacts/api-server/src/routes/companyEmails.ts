@@ -12,7 +12,7 @@ import { Router } from "express";
 import { google } from "googleapis";
 import { db, foundersTable, incubatorsTable, companyEventsTable, emailDraftsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
-import { generateEmail, type EmailKind, type EmailContext, isGeminiConfigured } from "../lib/gemini";
+import { generateEmail, type EmailKind, type EmailContext, isGeminiConfigured, summariseVision } from "../lib/gemini";
 import { getAuthedClient } from "../lib/google";
 
 const router = Router();
@@ -365,6 +365,63 @@ router.get("/companies/:id/drafts", async (req, res) => {
 // ─── GET /ai/status — quick gate to know if Gemini is wired ─────────────
 router.get("/ai/status", async (_req, res) => {
   res.json({ geminiConfigured: await isGeminiConfigured() });
+});
+
+// ─── POST /companies/:id/summarise-vision ────────────────────────────────
+/**
+ * Lazily AI-summarise the raw "About Startup" text into a 2-3 line vision.
+ *
+ * Called by the Sprint Data tab when it sees `vision` is null but
+ * `visionRaw` is present. The result is cached on `founders.vision` so
+ * subsequent opens don't re-spend Gemini quota.
+ *
+ * Body: {} (no input needed — pulls data from the company row)
+ * Returns: { vision: string }
+ *
+ * Errors:
+ *   400 — no visionRaw to summarise
+ *   503 — Gemini not configured
+ *   500 — Gemini call failed
+ */
+router.post("/companies/:id/summarise-vision", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  if (!await isGeminiConfigured()) {
+    res.status(503).json({ error: "AI is not configured. The server admin must set GEMINI_API_KEY." });
+    return;
+  }
+
+  try {
+    const [c] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    if (!c) { res.status(404).json({ error: "Company not found" }); return; }
+    if (c.ownerId && c.ownerId !== userId) { res.status(403).json({ error: "Not authorized" }); return; }
+    if (!c.visionRaw?.trim()) {
+      res.status(400).json({ error: "No 'About the Startup' content found. Fill that tab in your sheet and re-sync." });
+      return;
+    }
+
+    // If we already have a cached summary AND the raw hasn't changed,
+    // short-circuit. (The frontend should also gate on this — defensive.)
+    if (c.vision?.trim()) {
+      res.json({ vision: c.vision, cached: true });
+      return;
+    }
+
+    const vision = await summariseVision({
+      companyName: c.companyName,
+      founderName: c.name,
+      rawAbout: c.visionRaw,
+    });
+
+    await db.update(foundersTable).set({ vision }).where(eq(foundersTable.id, id));
+    res.json({ vision, cached: false });
+  } catch (err) {
+    req.log.error({ err }, "Vision summarise failed");
+    const msg = err instanceof Error ? err.message : "Vision summarise failed";
+    res.status(500).json({ error: msg });
+  }
 });
 
 export default router;

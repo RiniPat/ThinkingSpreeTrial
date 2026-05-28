@@ -112,6 +112,14 @@ router.get("/companies/:id", async (req, res) => {
         gap: foundersTable.gap,
         mentorRecommendation: foundersTable.mentorRecommendation,
         marketAccess: foundersTable.marketAccess,
+        tasks: foundersTable.tasks,
+        // Sprint Data extended fields
+        visionRaw: foundersTable.visionRaw,
+        smartGoal3Months: foundersTable.smartGoal3Months,
+        previousFundraiseCr: foundersTable.previousFundraiseCr,
+        previousFundraiseOrgs: foundersTable.previousFundraiseOrgs,
+        currentBurn: foundersTable.currentBurn,
+        runway: foundersTable.runway,
         excelData: foundersTable.excelData,
         createdAt: foundersTable.createdAt,
       })
@@ -200,7 +208,15 @@ async function ingestParsedTemplate(opts: {
     name: parsed.founderName,
     email: founderEmailInput || existing?.email || `unknown+${Date.now()}@placeholder.local`,
     incubatorId: cohortId ?? existing?.incubatorId ?? null,
-    vision: parsed.vision ?? existing?.vision ?? null,
+    // Vision (AI-summarised): we DON'T copy the parser's value here because
+    // the parser intentionally returns null. We DO keep the existing cached
+    // summary IF the raw text hasn't changed — see visionRaw below.
+    // If the raw paragraph has changed, we wipe the cached summary so the
+    // Sprint Data tab regenerates it.
+    vision: (parsed.visionRaw && parsed.visionRaw === existing?.visionRaw)
+      ? (existing?.vision ?? null)
+      : null,
+    visionRaw: parsed.visionRaw ?? existing?.visionRaw ?? null,
     deckUrl: parsed.deckUrl ?? existing?.deckUrl ?? null,
     sprintHost: parsed.sprintHost ?? existing?.sprintHost ?? null,
     coHost: parsed.coHost ?? existing?.coHost ?? null,
@@ -208,6 +224,13 @@ async function ingestParsedTemplate(opts: {
     gap: parsed.gaps ?? existing?.gap ?? null,
     mentorRecommendation: parsed.mentorRecommendation ?? existing?.mentorRecommendation ?? null,
     marketAccess: parsed.marketAccess ?? existing?.marketAccess ?? null,
+    // Actionable Tasks (from SMART Goals tab) — stored in the legacy `tasks` column.
+    tasks: parsed.actionableSteps ?? existing?.tasks ?? null,
+    smartGoal3Months: parsed.smartGoal3Months ?? existing?.smartGoal3Months ?? null,
+    previousFundraiseCr: parsed.previousFundraiseCr ?? existing?.previousFundraiseCr ?? null,
+    previousFundraiseOrgs: parsed.previousFundraiseOrgs ?? existing?.previousFundraiseOrgs ?? null,
+    currentBurn: parsed.currentBurn ?? existing?.currentBurn ?? null,
+    runway: parsed.runway ?? existing?.runway ?? null,
     excelData: parsed.raw as any,
     stageWorkflow: parsed.detectedStage === "sprint_done"
       ? (existing?.stageWorkflow === "post_email_sent" ? existing.stageWorkflow : "sprint_done")

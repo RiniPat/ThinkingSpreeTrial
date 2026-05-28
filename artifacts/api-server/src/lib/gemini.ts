@@ -203,3 +203,75 @@ export async function generateEmail(kind: EmailKind, ctx: EmailContext): Promise
 
   return { subject: parsed.subject.trim(), body: parsed.body.trim() };
 }
+
+/**
+ * Lazily summarise the raw "About the Startup" text into a 2-3 line vision
+ * statement. Used by the Sprint Data tab's Vision card.
+ *
+ * Why a separate prompt: emails are creative + 200 words long; vision is
+ * crisp + 2-3 sentences. Different temperature, different rules. Keeping
+ * them as separate functions also means quota usage stays predictable —
+ * one Vision call per company, not per email send.
+ */
+export async function summariseVision(input: {
+  companyName: string;
+  founderName: string;
+  rawAbout: string;
+}): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not configured on the server.");
+  }
+  if (!input.rawAbout?.trim()) {
+    throw new Error("Nothing to summarise — the About Startup tab appears to be empty.");
+  }
+
+  const genai = new GoogleGenerativeAI(apiKey);
+  const model = genai.getGenerativeModel({
+    model: "gemini-1.5-flash",
+    generationConfig: {
+      // Lower temperature than email drafting — we want a faithful summary,
+      // not creative writing.
+      temperature: 0.3,
+      responseMimeType: "application/json",
+    },
+  });
+
+  const prompt = `You are summarising a startup's "About the Startup" content into a crisp 2-3 sentence Vision statement.
+
+COMPANY: ${input.companyName}
+FOUNDER: ${input.founderName}
+
+RAW ABOUT-THE-STARTUP CONTENT (from the consultant's sheet):
+"""
+${input.rawAbout.slice(0, 4000)}
+"""
+
+RULES
+1. Output JSON only, no fences: { "vision": "..." }
+2. 2-3 sentences. Maximum 60 words.
+3. Lead with what the company DOES, not buzzwords. Active voice.
+4. Capture: who they serve, what problem they solve, how they solve it.
+5. Do NOT invent facts not present in the source.
+6. If the raw content is too thin to make a meaningful statement, return:
+   { "vision": "Insufficient information to summarise. Add more detail to the About the Startup tab." }
+7. Don't quote the source — paraphrase.
+8. No bullet points, no headers, no markdown.`;
+
+  const result = await model.generateContent(prompt);
+  const text = result.response.text();
+  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+
+  let parsed: { vision?: string };
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    // Best-effort fallback — if Gemini ignored JSON mode and returned plain
+    // text, use the text directly (trimmed and bounded to 500 chars).
+    return text.slice(0, 500).trim();
+  }
+  if (!parsed.vision) {
+    throw new Error(`Gemini returned no vision field. Raw: ${text.slice(0, 200)}`);
+  }
+  return parsed.vision.trim();
+}

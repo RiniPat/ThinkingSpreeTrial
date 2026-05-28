@@ -29,8 +29,10 @@ export type ParsedTemplate = {
   sprintHost: string | null;
   /** Optional — secondary consultant from "TSprint organised by". */
   coHost: string | null;
-  /** Optional — Vision pulled from "About Startup" sheet. */
+  /** Optional — Vision (AI-summarised, populated lazily). null on initial parse. */
   vision: string | null;
+  /** Optional — Raw "About Startup" paragraph; AI summarises this into `vision` on demand. */
+  visionRaw: string | null;
   /** Optional — first SWOT strengths block, as text. */
   keyStrengths: string | null;
   /** Optional — first SWOT gaps block, as text. */
@@ -45,10 +47,20 @@ export type ParsedTemplate = {
   direction: string | null;
   /** Optional — Actionable tasks (from SMART Goals sheet). */
   actionableSteps: string | null;
+  /** Optional — SMART Goal for the next 3 months (from SMART Goals sheet). */
+  smartGoal3Months: string | null;
   /** Optional — Current funding status. */
   fundingStatus: string | null;
   /** Optional — Fund ask in crores. */
   fundAskCr: number | null;
+  /** Optional — Previous fundraise amount in crores (raw string e.g. "₹2 Cr"). */
+  previousFundraiseCr: string | null;
+  /** Optional — Comma-separated list of past investors. */
+  previousFundraiseOrgs: string | null;
+  /** Optional — Current monthly burn (raw string). */
+  currentBurn: string | null;
+  /** Optional — Runway in months / weeks (raw string). */
+  runway: string | null;
   /** Optional — Revenue (last 12 months) as raw text. */
   revenueLast12Months: string | null;
   /** Optional — MRR / last month revenue as raw text. */
@@ -182,35 +194,61 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
     "Deck"
   );
   const cohort = findValueByLabel(overview, "Cohort", "Incubator", "Program");
-  const sprintHost = findValueByLabel(
-    overview,
-    "T-Sprint Consultants Assigned",
-    "T-Sprint Consultant Assigned",
-    "Consultant Assigned",
-    "Consultants Assigned"
-  );
-  const coHost = findValueByLabel(
-    overview,
-    "TSprint organised by",
-    "T-Sprint organised by",
-    "Sprint organised by",
-    "Organised by",
-    "Co-Host",
-    "Co Host"
-  );
+
+  // Sprint Host + Co-Host are on the same Overview row: column B is the
+  // label "T-Sprint Consultants Assigned", column C is the host name,
+  // column D is the co-host name. We find the host the usual way, then
+  // walk one extra cell to the right on the same row for the co-host.
+  let sprintHost: string | null = null;
+  let coHost: string | null = null;
+  for (let r = 0; r < overview.length; r++) {
+    const row = overview[r];
+    for (let c = 0; c < row.length; c++) {
+      const cell = row[c];
+      if (!cell) continue;
+      if (labelEq(cell, "T-Sprint Consultants Assigned")
+          || labelEq(cell, "T-Sprint Consultant Assigned")
+          || labelEq(cell, "Consultant Assigned")
+          || labelEq(cell, "Consultants Assigned")
+          || labelHas(cell, "T-Sprint Consultants Assigned")
+          || labelHas(cell, "Consultant Assigned")) {
+        const next1 = row[c + 1];
+        const next2 = row[c + 2];
+        if (next1 && next1.trim()) sprintHost = next1.trim();
+        if (next2 && next2.trim()) coHost = next2.trim();
+        break;
+      }
+    }
+    if (sprintHost) break;
+  }
+  // Fall back to the old "organised by" row if the side-by-side parse didn't
+  // find a co-host — keeps older sheets working.
+  if (!coHost) {
+    coHost = findValueByLabel(
+      overview,
+      "TSprint organised by",
+      "T-Sprint organised by",
+      "Sprint organised by",
+      "Organised by",
+      "Co-Host",
+      "Co Host"
+    );
+  }
 
   if (!companyName) throw new Error('"Company Name" is missing from the Overview sheet.');
   if (!founderName) throw new Error('"Founder\'s Name" is missing from the Overview sheet.');
   if (!cohort) warnings.push("Cohort not set in Overview — uploaded without a cohort.");
 
-  // ─── About Startup sheet (vision-ish text) ─────────────────────────────
-  let vision: string | null = null;
+  // ─── About Startup sheet — keep the RAW paragraph here.
+  // The Sprint Data tab will lazily summarise it via Gemini into 2-3 lines
+  // and cache the result. We keep the raw text so the consultant can always
+  // refresh / re-summarise without re-syncing the sheet.
+  let visionRaw: string | null = null;
   const aboutWs = findSheet("About Startup", "About the Startup");
   if (aboutWs) {
     const aboutRows = sheetTo2D(aboutWs);
-    // Treat the entire first non-empty paragraph as vision.
     const flat = aboutRows.flat().filter((c) => c && c.length > 5);
-    if (flat.length > 0) vision = flat.join(" ").trim();
+    if (flat.length > 0) visionRaw = flat.join(" ").trim();
   }
 
   // ─── Milestones sheet → grab first non-empty Direction & T-Sprint Focus ─
@@ -263,15 +301,33 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
   // ─── Funding sheet ────────────────────────────────────────────────────
   let fundingStatus: string | null = null;
   let fundAskCr: number | null = null;
+  let previousFundraiseCr: string | null = null;
+  let previousFundraiseOrgs: string | null = null;
+  let currentBurn: string | null = null;
+  let runway: string | null = null;
   const fundingWs = findSheet("Funding");
   if (fundingWs) {
     const rows = sheetTo2D(fundingWs);
     fundingStatus = findValueByLabel(rows, "Current funding status");
     fundAskCr = num(findValueByLabel(rows, "Fund Ask  (in crores)", "Fund Ask (in crores)", "Fund Ask in crores"));
+    previousFundraiseCr = findValueByLabel(rows,
+      "Previous Fundraise (in CR) if applicable",
+      "Previous Fundraise (in CR)",
+      "Previous Fundraise");
+    previousFundraiseOrgs = findValueByLabel(rows,
+      "Previous Fundraise Organisations",
+      "Previous Fundraise Organizations");
+    currentBurn = findValueByLabel(rows,
+      "Current Burn if applicable",
+      "Current Burn",
+      "Burn Rate",
+      "Burn");
+    runway = findValueByLabel(rows, "Runway");
   }
 
-  // ─── SMART Goals sheet → actionable steps + revenue ────────────────────
+  // ─── SMART Goals sheet → actionable steps + 3-month goal + revenue ────
   let actionableSteps: string | null = null;
+  let smartGoal3Months: string | null = null;
   let revenueLast12Months: string | null = null;
   let revenueLastMonthMrr: string | null = null;
   let teamSize: number | null = null;
@@ -279,6 +335,11 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
   if (smartWs) {
     const rows = sheetTo2D(smartWs);
     actionableSteps = findValueByLabel(rows, "Actionable Task", "Actionable Tasks", "Actionable Steps");
+    smartGoal3Months = findValueByLabel(rows,
+      "SMART Goal (3 months)",
+      "SMART Goal 3 months",
+      "SMART Goal - 3 months",
+      "3 month SMART Goal");
     revenueLast12Months = findValueByLabel(rows, "Last 12 Months Revenue");
     revenueLastMonthMrr = findValueByLabel(rows, "Last Month Revenue (MRR)", "Last Month Revenue", "MRR");
     teamSize = num(findValueByLabel(rows, "Team Size"));
@@ -294,11 +355,11 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
 
   const raw: Record<string, unknown> = {
     overview: { companyName, founderName, founderEmail, cohort, deckUrl, sprintHost, coHost },
-    about: { vision },
+    about: { visionRaw },
     milestones: { direction },
     swot: { keyStrengths, gaps, opportunities, mentorRecommendation, marketAccess },
-    funding: { fundingStatus, fundAskCr },
-    smart: { actionableSteps, revenueLast12Months, revenueLastMonthMrr, teamSize },
+    funding: { fundingStatus, fundAskCr, previousFundraiseCr, previousFundraiseOrgs, currentBurn, runway },
+    smart: { actionableSteps, smartGoal3Months, revenueLast12Months, revenueLastMonthMrr, teamSize },
   };
 
   return {
@@ -309,7 +370,10 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
     deckUrl,
     sprintHost,
     coHost,
-    vision,
+    // vision used to be the long raw paragraph; now it's null on parse and
+    // gets populated lazily by the Sprint Data tab's "summarise" endpoint.
+    vision: null,
+    visionRaw,
     keyStrengths,
     gaps,
     opportunities,
@@ -317,8 +381,13 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
     marketAccess,
     direction,
     actionableSteps,
+    smartGoal3Months,
     fundingStatus,
     fundAskCr,
+    previousFundraiseCr,
+    previousFundraiseOrgs,
+    currentBurn,
+    runway,
     revenueLast12Months,
     revenueLastMonthMrr,
     teamSize,

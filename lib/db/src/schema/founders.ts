@@ -78,6 +78,19 @@ export const foundersTable = pgTable("founders", {
   // "Re-sync from Sheets" button — we hit the same sheet and re-parse it.
   // null when the company was created from a manual file upload or by hand.
   sourceSheetUrl: text("source_sheet_url"),
+  // ─── Sprint Data fields (migration 004) ─────────────────────────────────
+  // Raw "About Startup" paragraph. The Sprint Data tab lazily summarises
+  // this into `vision` via Gemini on first open and caches the result.
+  visionRaw: text("vision_raw"),
+  // SMART Goal for the next 3 months — from SMART Goals tab.
+  smartGoal3Months: text("smart_goal_3_months"),
+  // Previous fundraise amount (TEXT, not numeric, so values like "₹2 Cr
+  // (Pre-seed)" round-trip without information loss). The legacy
+  // previousFundraiseInr above is a numeric variant from an old import path
+  // — we keep it for back-compat but write to this column going forward.
+  previousFundraiseCr: text("previous_fundraise_cr"),
+  // Runway as raw text (e.g. "8 months", "Until Q3 2026").
+  runway: text("runway"),
   // -----------------------------------------------------------------------
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

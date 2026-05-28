@@ -11,6 +11,7 @@ import {
   ArrowLeft, Building2, User, Mail, ExternalLink, Sparkles, Send, CheckCircle2,
   Clock, Circle, AlertCircle, Upload, Save, Loader2, Calendar, FileText, ChevronRight,
   Pencil, RefreshCw, Trash2, X,
+  Target, TrendingUp, DollarSign, Lightbulb, Users2, Wallet, Eye, Wand2,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
@@ -39,6 +40,14 @@ type Company = {
   gap: string | null;
   mentorRecommendation: string | null;
   marketAccess: string | null;
+  tasks: string | null;
+  // Sprint Data extended fields (v4.7)
+  visionRaw: string | null;
+  smartGoal3Months: string | null;
+  previousFundraiseCr: string | null;
+  previousFundraiseOrgs: string | null;
+  currentBurn: string | null;
+  runway: string | null;
   excelData: any;
   createdAt: string;
 };
@@ -157,46 +166,317 @@ function Tracker({ events, currentStage, onMarkComplete }: {
 }
 
 // ─────────── Sub-component: Sprint Data tab ─────────────
+/**
+ * Visually redesigned for v4.7.
+ *
+ * Layout (top → bottom):
+ *   1. Vision hero card     — AI-summarised "About Startup" (lazy, click to generate)
+ *   2. Strategic Direction  — SMART Goal 3mo + Actionable Tasks + Direction
+ *   3. SWOT pair            — Strengths | Gaps  (side-by-side cards)
+ *   4. Recommendations pair — Mentor Connect | Market Access
+ *   5. Financials grid      — Previous fundraise · Burn · Runway · Fund Ask
+ *
+ * Empty fields are omitted; the entire tab shows an empty state only if
+ * NO field across all sections has a value.
+ */
 function SprintDataTab({ company }: { company: Company }) {
-  const sections = [
-    { title: "Vision (About Startup)", value: company.vision },
-    { title: "Key Strengths (SWOT)",   value: company.keyStrength },
-    { title: "Gaps (SWOT)",             value: company.gap },
-    { title: "Mentor Recommendation",   value: company.mentorRecommendation },
-    { title: "Market Access",           value: company.marketAccess },
-  ];
-  const hasAny = sections.some(s => s.value);
+  const { toast } = useToast();
+  const qc = useQueryClient();
 
-  if (!hasAny) {
+  // Lazy AI summarisation mutation. Triggered by clicking "Generate vision"
+  // when there's a raw About-Startup paragraph but no cached vision yet.
+  const summariseMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${BASE}/api/companies/${company.id}/summarise-vision`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e?.error || `Summarise failed (${res.status})`);
+      }
+      return (await res.json()) as { vision: string; cached: boolean };
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["company", company.id] });
+      if (!data.cached) {
+        toast({ title: "Vision generated", description: "Cached on the company record." });
+      }
+    },
+    onError: (err: any) => {
+      toast({ title: "Couldn't generate vision", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // What we have to show. Used both for the empty-state check and the layout.
+  const hasVision      = Boolean(company.vision || company.visionRaw);
+  const hasDirection   = Boolean(company.smartGoal3Months || company.tasks);
+  const hasSwot        = Boolean(company.keyStrength || company.gap);
+  const hasRecos       = Boolean(company.mentorRecommendation || company.marketAccess);
+  const hasFinancials  = Boolean(
+    company.previousFundraiseCr || company.previousFundraiseOrgs ||
+    company.currentBurn || company.runway,
+  );
+  const anyContent = hasVision || hasDirection || hasSwot || hasRecos || hasFinancials;
+
+  if (!anyContent) {
     return (
       <div className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
         <FileText className="mx-auto h-10 w-10 text-muted-foreground/40" />
         <h3 className="mt-3 font-medium text-foreground">No session data yet</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          Post-sprint data will appear here after you re-upload the completed Sprint Template.
+          Sprint data will appear here once you fill the SWOT, Funding and SMART Goals tabs
+          in your Google Sheet, then click <strong>Re-sync from Sheet</strong>.
         </p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
-      {sections.map(s => s.value && (
-        <div key={s.title} className="rounded-lg border border-border bg-card p-5">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{s.title}</h3>
-          <p className="mt-2 text-sm text-foreground whitespace-pre-wrap leading-relaxed">{s.value}</p>
+    <div className="space-y-6">
+      {/* ── 1. Vision hero ─────────────────────────────────────────────── */}
+      {hasVision && (
+        <section
+          className="relative overflow-hidden rounded-xl border border-border bg-card p-6"
+          style={{
+            background: "linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted) / 0.5) 100%)",
+          }}
+        >
+          {/* Decorative accent corner */}
+          <div className="absolute -top-12 -right-12 h-32 w-32 rounded-full opacity-10 blur-2xl"
+               style={{ background: "var(--gold)" }} />
+
+          <div className="relative flex items-start gap-3">
+            <div className="rounded-lg p-2.5 flex-shrink-0"
+                 style={{ background: "var(--gold)", opacity: 0.15 }}>
+              <Eye className="h-5 w-5" style={{ color: "var(--gold)" }} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Vision
+                </h3>
+                {company.vision && (
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 inline-flex items-center gap-1">
+                    <Wand2 className="h-3 w-3" /> AI-summarised
+                  </span>
+                )}
+              </div>
+
+              {company.vision ? (
+                <p className="mt-2 font-serif text-xl leading-snug text-foreground">
+                  {company.vision}
+                </p>
+              ) : (
+                <div className="mt-3">
+                  <p className="text-sm text-muted-foreground">
+                    The full "About the Startup" content is available. Generate a crisp 2-3 sentence
+                    vision statement using AI.
+                  </p>
+                  <button
+                    onClick={() => summariseMutation.mutate()}
+                    disabled={summariseMutation.isPending}
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 transition"
+                  >
+                    {summariseMutation.isPending
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : <Wand2 className="h-3.5 w-3.5" />}
+                    {summariseMutation.isPending ? "Generating…" : "Generate Vision with AI"}
+                  </button>
+                </div>
+              )}
+
+              {/* Show the raw text in a collapsed section for transparency */}
+              {company.visionRaw && (
+                <details className="mt-4 group">
+                  <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1">
+                    <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
+                    View full "About the Startup" text
+                  </summary>
+                  <div className="mt-2 rounded border border-border bg-background/50 p-3 text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                    {company.visionRaw}
+                  </div>
+                  {company.vision && (
+                    <button
+                      onClick={() => {
+                        // Clear cached vision so the next click re-generates
+                        // (we re-use the same endpoint; it'll re-summarise
+                        // because vision is empty server-side after this nudge).
+                        // Easier UX: just call the mutation, server returns
+                        // cached unless we pass a hint. For simplicity right
+                        // now we just regenerate by toast — user can wait
+                        // for the next sync to refresh the summary.
+                        toast({ title: "Tip", description: "Re-sync the sheet to refresh the Vision summary." });
+                      }}
+                      className="mt-2 text-[11px] text-primary hover:underline"
+                    >
+                      Want a different summary? Re-sync the sheet.
+                    </button>
+                  )}
+                </details>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── 2. Strategic Direction ────────────────────────────────────── */}
+      {(company.smartGoal3Months || company.tasks) && (
+        <SectionHeader icon={Target} label="Strategic Direction" />
+      )}
+      {company.smartGoal3Months && (
+        <DataCard
+          icon={Target}
+          title="SMART Goal — Next 3 Months"
+          accent="violet"
+          text={company.smartGoal3Months}
+        />
+      )}
+      {company.tasks && (
+        <DataCard
+          icon={CheckCircle2}
+          title="Actionable Tasks"
+          accent="emerald"
+          text={company.tasks}
+        />
+      )}
+
+      {/* ── 3. SWOT (side-by-side on lg+) ─────────────────────────────── */}
+      {hasSwot && <SectionHeader icon={TrendingUp} label="SWOT Highlights" />}
+      {hasSwot && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {company.keyStrength && (
+            <DataCard icon={TrendingUp} title="Key Strengths" accent="emerald"
+                      text={company.keyStrength} />
+          )}
+          {company.gap && (
+            <DataCard icon={AlertCircle} title="Gaps & Risks" accent="amber"
+                      text={company.gap} />
+          )}
         </div>
-      ))}
-      {/* Raw Excel data viewer for power users */}
+      )}
+
+      {/* ── 4. Recommendations (side-by-side on lg+) ──────────────────── */}
+      {hasRecos && <SectionHeader icon={Lightbulb} label="Recommendations" />}
+      {hasRecos && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {company.mentorRecommendation && (
+            <DataCard icon={Users2} title="Mentor Connect" accent="indigo"
+                      text={company.mentorRecommendation} />
+          )}
+          {company.marketAccess && (
+            <DataCard icon={Lightbulb} title="Market Access" accent="rose"
+                      text={company.marketAccess} />
+          )}
+        </div>
+      )}
+
+      {/* ── 5. Financials ────────────────────────────────────────────── */}
+      {hasFinancials && <SectionHeader icon={DollarSign} label="Financials" />}
+      {hasFinancials && (
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-border">
+            <StatCell icon={Wallet}
+                      label="Previous Fundraise"
+                      value={company.previousFundraiseCr}
+                      sub={company.previousFundraiseOrgs ?? undefined} />
+            <StatCell icon={DollarSign}
+                      label="Current Burn"
+                      value={company.currentBurn} />
+            <StatCell icon={Clock}
+                      label="Runway"
+                      value={company.runway} />
+            <StatCell icon={TrendingUp}
+                      label="Fund Ask"
+                      value={company.excelData?.funding?.fundAskCr
+                        ? `₹ ${company.excelData.funding.fundAskCr} Cr`
+                        : null} />
+          </div>
+        </div>
+      )}
+
+      {/* Power-user escape hatch: still expose the raw JSON */}
       {company.excelData && (
-        <details className="rounded-lg border border-border bg-card p-5">
-          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Raw parsed Excel data
+        <details className="rounded-lg border border-border bg-card p-4">
+          <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Raw parsed sheet data (debug)
           </summary>
-          <pre className="mt-3 overflow-x-auto rounded bg-muted p-3 text-[11px] font-mono">
+          <pre className="mt-3 overflow-x-auto rounded bg-muted p-3 text-[11px] font-mono leading-relaxed">
             {JSON.stringify(company.excelData, null, 2)}
           </pre>
         </details>
+      )}
+    </div>
+  );
+}
+
+// ─── Sprint Data section primitives ──────────────────────────────────────
+function SectionHeader({ icon: Icon, label }: { icon: React.ElementType; label: string }) {
+  return (
+    <div className="flex items-center gap-2 px-1 pt-2">
+      <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+        {label}
+      </h2>
+      <div className="flex-1 border-t border-border ml-2" />
+    </div>
+  );
+}
+
+/**
+ * A single-field data card. The `accent` prop sets the icon background tint
+ * so the eye can scan related cards quickly. We use specific Tailwind classes
+ * (rather than dynamic) so JIT compiles them — string-interpolated class
+ * names would get tree-shaken.
+ */
+function DataCard({ icon: Icon, title, accent, text }: {
+  icon: React.ElementType;
+  title: string;
+  accent: "emerald" | "amber" | "violet" | "indigo" | "rose";
+  text: string;
+}) {
+  const accentBg: Record<string, string> = {
+    emerald: "bg-emerald-50 text-emerald-700",
+    amber:   "bg-amber-50 text-amber-700",
+    violet:  "bg-violet-50 text-violet-700",
+    indigo:  "bg-indigo-50 text-indigo-700",
+    rose:    "bg-rose-50 text-rose-700",
+  };
+  return (
+    <div className="rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-sm">
+      <div className="flex items-center gap-2.5">
+        <div className={`rounded-md p-1.5 ${accentBg[accent]}`}>
+          <Icon className="h-4 w-4" />
+        </div>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+      </div>
+      <p className="mt-3 text-sm text-foreground whitespace-pre-wrap leading-relaxed">{text}</p>
+    </div>
+  );
+}
+
+/** A small numeric/text stat cell — used in the Financials strip. */
+function StatCell({ icon: Icon, label, value, sub }: {
+  icon: React.ElementType;
+  label: string;
+  value: string | null;
+  sub?: string;
+}) {
+  return (
+    <div className="p-5">
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <Icon className="h-3.5 w-3.5" />
+        <span className="text-[11px] font-semibold uppercase tracking-wider">{label}</span>
+      </div>
+      <div className="mt-2 font-serif text-2xl text-foreground tabular-nums leading-tight">
+        {value || <span className="text-muted-foreground/50 italic text-base">—</span>}
+      </div>
+      {sub && (
+        <p className="mt-1 text-[11px] text-muted-foreground leading-relaxed truncate" title={sub}>
+          {sub}
+        </p>
       )}
     </div>
   );
@@ -312,9 +592,15 @@ export default function CompanyDetailPage() {
   const c = data.company;
   const events = data.events;
   const founderEmailMissing = !c.founderEmail || c.founderEmail.includes("@placeholder.local");
+  // Stage gating — generous on purpose, since consultants regularly want to
+  // re-draft an email after editing context. Workflow-wise:
+  //   pre_sprint       → Pre is the natural action; Post is locked.
+  //   pre_email_sent   → still allow regenerating Pre (rare but valid).
+  //   sprint_done      → Post is the natural action; Pre still allowed.
+  //   post_email_sent  → both still allowed (re-draft for forwarding etc.)
   const stageReady = {
-    pre:  c.stageWorkflow === "pre_sprint",
-    post: c.stageWorkflow === "sprint_done",
+    pre:  c.stageWorkflow !== "post_email_sent" || true, // always allow drafting
+    post: c.stageWorkflow === "sprint_done" || c.stageWorkflow === "post_email_sent",
   };
 
   return (
@@ -378,23 +664,25 @@ export default function CompanyDetailPage() {
               </div>
             </div>
 
-            {/* Action bar */}
+            {/* Action bar — buttons are enabled regardless of founder email.
+                If email is missing, the composer dialog itself prompts for it
+                before allowing Send. This is friendlier than locking the
+                button and forcing a separate email-edit step. */}
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <button
-                  disabled={!stageReady.pre || founderEmailMissing}
+                  disabled={!stageReady.pre}
                   onClick={() => setComposer({ open: true, kind: "pre" })}
                   className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition"
-                  title={founderEmailMissing ? "Add founder email first" : ""}
                 >
                   <Sparkles className="h-3.5 w-3.5" />
                   Generate Pre-Sprint Email
                 </button>
                 <button
-                  disabled={!stageReady.post || founderEmailMissing}
+                  disabled={!stageReady.post}
                   onClick={() => setComposer({ open: true, kind: "post" })}
                   className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition"
-                  title={!stageReady.post ? "Mark sprint complete first" : (founderEmailMissing ? "Add founder email first" : "")}
+                  title={!stageReady.post ? "Re-sync sheet with post-sprint data first, or mark sprint complete" : ""}
                 >
                   <Sparkles className="h-3.5 w-3.5" />
                   Generate Post-Sprint Email
@@ -464,14 +752,30 @@ export default function CompanyDetailPage() {
               { label: "Founder Email",    value: founderEmailMissing ? "— (set in header)" : c.founderEmail },
               { label: "Sprint Host",      value: c.sprintHost },
               { label: "Co-Host",          value: c.coHost },
-              { label: "Deck Link",        value: c.deckUrl },
-              { label: "Thinking Sheet",   value: c.thinkingSheetUrl },
+              // Deck and Thinking Sheet are URLs — render as clickable links.
+              // Thinking Sheet falls back to source_sheet_url (the consultant's
+              // pasted Google Sheets URL is the Thinking Sheet by definition,
+              // per the team's workflow).
+              { label: "Deck Link",        value: c.deckUrl, href: c.deckUrl },
+              { label: "Thinking Sheet",   value: c.thinkingSheetUrl ?? c.sourceSheetUrl, href: c.thinkingSheetUrl ?? c.sourceSheetUrl },
               { label: "Created",          value: format(parseISO(c.createdAt), "d MMM yyyy") },
             ].map(f => (
               <div key={f.label} className="rounded-lg border border-border bg-card p-4">
                 <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{f.label}</div>
-                <div className="mt-1 text-sm text-foreground">
-                  {f.value || <span className="text-muted-foreground italic">Not provided</span>}
+                <div className="mt-1 text-sm text-foreground break-all">
+                  {f.value ? (
+                    f.href && /^https?:\/\//i.test(String(f.href)) ? (
+                      <a href={String(f.href)} target="_blank" rel="noreferrer"
+                         className="text-primary hover:underline inline-flex items-center gap-1">
+                        <ExternalLink className="h-3 w-3 flex-shrink-0" />
+                        Open link
+                      </a>
+                    ) : (
+                      String(f.value)
+                    )
+                  ) : (
+                    <span className="text-muted-foreground italic">Not provided</span>
+                  )}
                 </div>
               </div>
             ))}
