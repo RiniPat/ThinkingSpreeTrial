@@ -86,33 +86,72 @@ export default function ProposalBuilderPage() {
           </button>
         </section>
 
-        <section className="rounded-xl border border-border bg-card overflow-hidden">
-          {isLoading ? (
-            <div className="p-5 space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 rounded" />)}</div>
-          ) : (listData?.proposals ?? []).length === 0 ? (
-            <div className="p-10 text-center text-sm text-muted-foreground">No proposals yet — click New Proposal to start.</div>
-          ) : (
-            <ul className="divide-y divide-border">
-              {(listData?.proposals ?? []).map(p => (
-                <li key={p.id}>
-                  <button onClick={() => setActive(p.id)} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition text-left">
-                    <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+        {isLoading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-44 rounded-xl" />)}
+          </div>
+        ) : (listData?.proposals ?? []).length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center">
+            <div className="mx-auto rounded-full bg-muted/50 p-3 w-fit">
+              <FileText className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <h3 className="mt-3 font-serif text-xl text-foreground">No proposals yet</h3>
+            <p className="mt-1 text-sm text-muted-foreground max-w-md mx-auto">
+              Start a new proposal: pick the section structure (or use defaults), then have AI fill each section's body.
+            </p>
+            <button onClick={() => setCreateOpen(true)} className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90">
+              <Plus className="h-4 w-4" /> Start your first proposal
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {(listData?.proposals ?? []).map(p => {
+              const sections = p.sections ?? [];
+              const filled = sections.filter((s: any) => s.body && s.body.trim()).length;
+              const progress = sections.length > 0 ? Math.round((filled / sections.length) * 100) : 0;
+              const initials = (p.prospectCompany || "?").trim().slice(0, 2).toUpperCase();
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => setActive(p.id)}
+                  className="group rounded-xl border border-border bg-card p-5 text-left transition hover:border-primary/40 hover:shadow-sm relative overflow-hidden"
+                >
+                  {/* Subtle accent strip */}
+                  <div className={`absolute top-0 left-0 h-1 w-full ${p.status === "final" ? "bg-emerald-500/80" : "bg-amber-500/60"}`} />
+
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-md font-serif text-lg flex items-center justify-center w-11 h-11 flex-shrink-0"
+                         style={{ background: "var(--gold)", color: "hsl(222 38% 15%)" }}>
+                      {initials}
+                    </div>
                     <div className="min-w-0 flex-1">
-                      <div className="font-medium text-foreground truncate">{p.prospectName} · {p.prospectCompany}</div>
-                      <div className="text-[11px] text-muted-foreground">
-                        {(p.sections ?? []).length} sections · {p.status} · updated {new Date(p.updatedAt).toLocaleDateString("en-IN")}
-                      </div>
+                      <div className="font-medium text-foreground truncate">{p.prospectCompany}</div>
+                      <div className="text-[11px] text-muted-foreground truncate">To {p.prospectName}</div>
                     </div>
                     <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${p.status === "final" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200"}`}>
                       {p.status}
                     </span>
-                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+                  </div>
+
+                  {/* Progress bar — filled vs total sections */}
+                  <div className="mt-4 space-y-1">
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                      <span>{filled}/{sections.length} sections drafted</span>
+                      <span className="tabular-nums">{progress}%</span>
+                    </div>
+                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} />
+                    </div>
+                  </div>
+
+                  <div className="mt-3 text-[11px] text-muted-foreground">
+                    Updated {new Date(p.updatedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {createOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -252,6 +291,25 @@ function ProposalDetail({ proposal, onBack }: { proposal: Proposal | undefined; 
               <p className="mt-1 text-sm text-muted-foreground">To {proposal.prospectName}</p>
             </div>
             <div className="flex items-center gap-2">
+              <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium ${proposal.status === "final" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200"}`}>
+                {proposal.status}
+              </span>
+              <button
+                onClick={async () => {
+                  const next = proposal.status === "final" ? "draft" : "final";
+                  await fetch(`${BASE}/api/sales/proposals/${proposal.id}`, {
+                    method: "PATCH", credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ status: next }),
+                  });
+                  qc.invalidateQueries({ queryKey: ["/api/sales/proposals", proposal.id] });
+                  qc.invalidateQueries({ queryKey: ["/api/sales/proposals"] });
+                  toast({ title: next === "final" ? "Marked as final" : "Reverted to draft" });
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium hover:bg-muted"
+              >
+                {proposal.status === "final" ? "Revert to draft" : "Mark as final"}
+              </button>
               <button onClick={exportAsText} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium hover:bg-muted">
                 <Copy className="h-3.5 w-3.5" /> Copy as text
               </button>

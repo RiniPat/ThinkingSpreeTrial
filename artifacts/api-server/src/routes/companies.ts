@@ -120,6 +120,9 @@ router.get("/companies/:id", async (req, res) => {
         previousFundraiseOrgs: foundersTable.previousFundraiseOrgs,
         currentBurn: foundersTable.currentBurn,
         runway: foundersTable.runway,
+        nextStageGoal: foundersTable.nextStageGoal,
+        nextStageRunway: foundersTable.nextStageRunway,
+        fundsFor: foundersTable.fundsFor,
         observationsTsDashboard: foundersTable.observationsTsDashboard,
         excelData: foundersTable.excelData,
         createdAt: foundersTable.createdAt,
@@ -232,6 +235,9 @@ async function ingestParsedTemplate(opts: {
     previousFundraiseOrgs: parsed.previousFundraiseOrgs ?? existing?.previousFundraiseOrgs ?? null,
     currentBurn: parsed.currentBurn ?? existing?.currentBurn ?? null,
     runway: parsed.runway ?? existing?.runway ?? null,
+    nextStageGoal: parsed.nextStageGoal ?? existing?.nextStageGoal ?? null,
+    nextStageRunway: parsed.nextStageRunway ?? existing?.nextStageRunway ?? null,
+    fundsFor: parsed.fundsFor ?? existing?.fundsFor ?? null,
     excelData: parsed.raw as any,
     stageWorkflow: parsed.detectedStage === "sprint_done"
       ? (existing?.stageWorkflow === "post_email_sent" ? existing.stageWorkflow : "sprint_done")

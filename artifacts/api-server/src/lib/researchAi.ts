@@ -11,6 +11,7 @@
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { brandSummaryForPrompt } from "./brandContext";
 
 const MODEL = "gemini-2.5-flash";
 
@@ -340,8 +341,12 @@ export async function fillProposalSection(
     ? `EARLIER SECTIONS (for continuity, don't repeat):\n${input.previousSections!.map(s => `- ${s.heading}: ${s.body.slice(0,200)}…`).join("\n")}\n\n`
     : "";
 
-  const prompt = `You are a business consultant writing one section of a client proposal.
+  const prompt = `You are a senior consultant at Thinking Spree writing one section of a client proposal. Use the firm's voice — confident, specific, design-thinking informed — not generic consulting boilerplate.
 
+${brandSummaryForPrompt()}
+
+────────────────────────────────────────
+THIS PROPOSAL:
 PROSPECT: ${input.prospectName} at ${input.prospectCompany}
 PROPOSAL BRIEF: ${input.brief}
 
@@ -356,7 +361,9 @@ Rules:
 - Concrete and specific. Avoid consulting-speak ("synergies", "leverage").
 - Address the prospect directly.
 - Keep paragraphs short (2-4 sentences each).
-- If the section needs facts you don't have, say "we'll confirm the exact figure with you" instead of inventing.`;
+- Where it strengthens the case, reference Thinking Spree's methodology pillars or relevant track record. Don't dump all the impact stats; pick what fits this section.
+- For sections like "Investment", "Deliverables", "Pricing" — DO NOT invent numbers, fees, or timelines. Say "we'll confirm with you" or use placeholders like "[fee TBD]".
+- For sections like "Executive Summary" or "Approach", lead with what's distinctive about Thinking Spree (Design Thinking + Business Model Canvas + Agility frameworks), not generic value claims.`;
 
   return runJsonPrompt<ProposalSectionFillOutput>(prompt);
 }

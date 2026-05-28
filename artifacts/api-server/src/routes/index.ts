@@ -14,6 +14,9 @@ import companiesRouter from "./companies";
 import companyEmailsRouter from "./companyEmails";
 import dashboardStatsRouter from "./dashboardStats";
 import researchWorkspaceRouter from "./researchWorkspace";
+import globalSearchRouter from "./globalSearch";
+import sprintSessionsRouter from "./sprintSessions";
+import outcomesReportRouter from "./outcomesReport";
 
 const router: IRouter = Router();
 
@@ -32,5 +35,8 @@ router.use(companiesRouter);
 router.use(companyEmailsRouter);
 router.use(dashboardStatsRouter);
 router.use(researchWorkspaceRouter);
+router.use(globalSearchRouter);
+router.use(sprintSessionsRouter);
+router.use(outcomesReportRouter);
 
 export default router;

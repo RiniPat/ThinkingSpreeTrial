@@ -13,6 +13,9 @@ import { z } from "zod/v4";
 export const emailDraftsTable = pgTable("email_drafts", {
   id: serial("id").primaryKey(),
   founderId: integer("founder_id").notNull(),
+  // Optional link to a sprint_session. NULL for legacy pre-v5.2 drafts or
+  // for companies that have never had a session snapshot.
+  sessionId: integer("session_id"),
   userId: integer("user_id"),
   kind: text("kind").notNull(),   // 'pre' | 'post'
   subject: text("subject").notNull(),

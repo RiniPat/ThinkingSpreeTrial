@@ -91,6 +91,10 @@ export const foundersTable = pgTable("founders", {
   previousFundraiseCr: text("previous_fundraise_cr"),
   // Runway as raw text (e.g. "8 months", "Until Q3 2026").
   runway: text("runway"),
+  // ─── Metrics tab (v5.1) — values BESIDE the label in column C ──────────
+  nextStageGoal: text("next_stage_goal"),
+  nextStageRunway: text("next_stage_runway"),
+  fundsFor: text("funds_for"),
   // Internal post-sprint observations written by the Host after the session.
   // Lives only on the dashboard (not in the Google Sheet). Surfaced on the
   // Sprint Data tab and used as additional context for the post-sprint email.

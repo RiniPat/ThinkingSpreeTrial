@@ -17,10 +17,12 @@ import {
   FileText,
   Users,
   Shield,
+  TrendingUp,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import logoPath from "@assets/thinkingspree_logo_1778683092464.jpg";
+import { GlobalSearch } from "./GlobalSearch";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -41,6 +43,7 @@ const navItems: NavItem[] = [
   { href: "/companies",       label: "Companies",       icon: Briefcase },
   { href: "/summary",         label: "Summary Sheet",   icon: BarChart3 },
   { href: "/sprint-tracking", label: "Sprint Tracking", icon: Activity },
+  { href: "/reports/outcomes", label: "Outcomes Report", icon: TrendingUp, needsResearch: true },
 
   // Research group (consultant / research / admin)
   { href: "/research",        label: "Research",        icon: Sparkles, needsResearch: true, group: "Research" },
@@ -224,6 +227,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
       )}
 
       <main className="md:ml-64 min-h-screen">
+        {/* Desktop top bar with global search */}
+        <div className="hidden md:flex items-center gap-4 px-6 lg:px-10 py-3 border-b border-border bg-background/95 backdrop-blur sticky top-0 z-20">
+          <GlobalSearch />
+        </div>
         {children}
       </main>
     </div>

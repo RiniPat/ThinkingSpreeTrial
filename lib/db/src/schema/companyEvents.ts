@@ -16,6 +16,9 @@ export const companyEventsTable = pgTable("company_events", {
   id: serial("id").primaryKey(),
   founderId: integer("founder_id").notNull(),
   userId: integer("user_id"),
+  // Optional link to a sprint_session (v5.2). NULL for company-level
+  // events not tied to a specific session.
+  sessionId: integer("session_id"),
   /**
    * Kind values:
    *   'template_uploaded'   — consultant uploaded a Sprint Template xlsx

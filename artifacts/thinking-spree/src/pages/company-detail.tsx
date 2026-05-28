@@ -48,6 +48,9 @@ type Company = {
   previousFundraiseOrgs: string | null;
   currentBurn: string | null;
   runway: string | null;
+  nextStageGoal: string | null;
+  nextStageRunway: string | null;
+  fundsFor: string | null;
   observationsTsDashboard: string | null;
   excelData: any;
   createdAt: string;
@@ -181,10 +184,11 @@ function Tracker({ events, currentStage, onMarkComplete }: {
  * Empty fields are omitted; the entire tab shows an empty state only if
  * NO field across all sections has a value.
  */
-function SprintDataTab({ company, onSaveObservations, savingObservations }: {
+function SprintDataTab({ company, onSaveObservations, savingObservations, readOnly }: {
   company: Company;
   onSaveObservations: (text: string) => void;
   savingObservations: boolean;
+  readOnly?: boolean;
 }) {
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -230,7 +234,8 @@ function SprintDataTab({ company, onSaveObservations, savingObservations }: {
     company.previousFundraiseCr || company.previousFundraiseOrgs ||
     company.currentBurn || company.runway,
   );
-  const anyContent = hasVision || hasDirection || hasSwot || hasRecos || hasFinancials;
+  const hasNextStage   = Boolean(company.nextStageGoal || company.nextStageRunway || company.fundsFor);
+  const anyContent = hasVision || hasDirection || hasSwot || hasRecos || hasFinancials || hasNextStage;
 
   return (
     <div className="space-y-6">
@@ -386,6 +391,24 @@ function SprintDataTab({ company, onSaveObservations, savingObservations }: {
       )}
 
       {/* ── 5. Financials ────────────────────────────────────────────── */}
+      {/* ── 4½. Next Stage Plan (Metrics tab, v5.1) ─────────────────────── */}
+      {hasNextStage && <SectionHeader icon={Target} label="Next Stage Plan" />}
+      {hasNextStage && (
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-border">
+            <StatCell icon={Target}
+                      label="Quantifiable Goal — Next Stage"
+                      value={company.nextStageGoal} />
+            <StatCell icon={Clock}
+                      label="Runway — Next Stage (Post Funding)"
+                      value={company.nextStageRunway} />
+            <StatCell icon={Wallet}
+                      label="Funds For (What Needs Building)"
+                      value={company.fundsFor} />
+          </div>
+        </div>
+      )}
+
       {hasFinancials && <SectionHeader icon={DollarSign} label="Financials" />}
       {hasFinancials && (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -425,7 +448,7 @@ function SprintDataTab({ company, onSaveObservations, savingObservations }: {
           onChange={(e) => setObs(e.target.value)}
           rows={5}
           placeholder="Notes from the Host after the sprint session — what stood out, where the founder needs the most support, internal flags..."
-          disabled={savingObservations}
+          disabled={savingObservations || readOnly}
           className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition leading-relaxed disabled:opacity-60"
         />
         <div className="mt-2 flex items-center justify-between">
@@ -446,7 +469,8 @@ function SprintDataTab({ company, onSaveObservations, savingObservations }: {
             )}
             <button
               onClick={() => onSaveObservations(obs)}
-              disabled={savingObservations || !obsDirty}
+              disabled={savingObservations || !obsDirty || readOnly}
+              title={readOnly ? "Viewing an archived session — switch back to Latest to edit" : ""}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition"
             >
               {savingObservations ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
@@ -631,6 +655,102 @@ export default function CompanyDetailPage() {
     },
     onError: (err: any) => toast({ title: "Delete failed", description: err.message, variant: "destructive" }),
   });
+
+  // ─── Multi-sprint sessions (v5.2) ──────────────────────────────────
+  // Sessions are immutable snapshots of the company's Sprint Data at a
+  // point in time. The "active session" is what the user is currently
+  // viewing — either the live data (null) or a frozen session row.
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  type Session = {
+    id: number;
+    label: string;
+    sessionNumber: number;
+    stageWorkflow: string | null;
+    vision: string | null; visionRaw: string | null;
+    keyStrength: string | null; gap: string | null;
+    mentorRecommendation: string | null; marketAccess: string | null;
+    tasks: string | null;
+    smartGoal3Months: string | null;
+    previousFundraiseCr: string | null; previousFundraiseOrgs: string | null;
+    currentBurn: string | null; runway: string | null;
+    nextStageGoal: string | null; nextStageRunway: string | null; fundsFor: string | null;
+    observationsTsDashboard: string | null;
+    excelData: any;
+    createdAt: string;
+  };
+  const { data: sessionsData } = useQuery<{ sessions: Session[] }>({
+    queryKey: ["company-sessions", id],
+    queryFn: () => customFetch(`${BASE}/api/companies/${id}/sessions`, { credentials: "include" }),
+    enabled: Number.isFinite(id),
+    staleTime: 10_000,
+  });
+  const sessions = sessionsData?.sessions ?? [];
+  const activeSession = activeSessionId !== null
+    ? sessions.find(s => s.id === activeSessionId) ?? null
+    : null;
+
+  // Create a new snapshot. Optional label.
+  const snapshotMutation = useMutation({
+    mutationFn: async (label?: string) => {
+      const res = await fetch(`${BASE}/api/companies/${id}/sessions`, {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Snapshot failed");
+      return (await res.json()).session as Session;
+    },
+    onSuccess: (s) => {
+      toast({ title: "Sprint session saved", description: `Snapshot "${s.label}" archived.` });
+      qc.invalidateQueries({ queryKey: ["company-sessions", id] });
+      qc.invalidateQueries({ queryKey: ["company", id] });
+    },
+    onError: (err: any) => toast({ title: "Snapshot failed", description: err.message, variant: "destructive" }),
+  });
+
+  const deleteSessionMutation = useMutation({
+    mutationFn: async (sessionId: number) => {
+      const res = await fetch(`${BASE}/api/companies/${id}/sessions/${sessionId}`, {
+        method: "DELETE", credentials: "include",
+      });
+      if (!res.ok) throw new Error("Delete failed");
+    },
+    onSuccess: () => {
+      toast({ title: "Session deleted" });
+      qc.invalidateQueries({ queryKey: ["company-sessions", id] });
+      setActiveSessionId(null);
+    },
+  });
+
+  /**
+   * Merged view of the company. If a session is active, we overlay its
+   * frozen fields on top of the live company so the rest of the UI
+   * (Sprint Data tab, etc.) "just works" without knowing about sessions.
+   */
+  function mergeWithSession(live: any, session: Session | null): any {
+    if (!session) return live;
+    return {
+      ...live,
+      stageWorkflow: session.stageWorkflow ?? live.stageWorkflow,
+      vision: session.vision,
+      visionRaw: session.visionRaw,
+      keyStrength: session.keyStrength,
+      gap: session.gap,
+      mentorRecommendation: session.mentorRecommendation,
+      marketAccess: session.marketAccess,
+      tasks: session.tasks,
+      smartGoal3Months: session.smartGoal3Months,
+      previousFundraiseCr: session.previousFundraiseCr,
+      previousFundraiseOrgs: session.previousFundraiseOrgs,
+      currentBurn: session.currentBurn,
+      runway: session.runway,
+      nextStageGoal: session.nextStageGoal,
+      nextStageRunway: session.nextStageRunway,
+      fundsFor: session.fundsFor,
+      observationsTsDashboard: session.observationsTsDashboard,
+      excelData: session.excelData,
+    };
+  }
 
   // Manual workflow stage change. Free-form: forward or backward. Logged
   // as a `stage_changed` timeline event by the server.
@@ -832,6 +952,65 @@ export default function CompanyDetailPage() {
           </div>
         </section>
 
+        {/* ─── Multi-Sprint Session bar (v5.2) ───────────────────────────
+            Lets the consultant snapshot the current Sprint Data and switch
+            between archived sessions. Compact: dropdown + actions only. */}
+        <section className="rounded-lg border border-border bg-card p-3 flex items-center gap-3 flex-wrap text-xs">
+          <span className="font-semibold uppercase tracking-wider text-muted-foreground">Sprint Session:</span>
+          <select
+            value={activeSessionId === null ? "live" : String(activeSessionId)}
+            onChange={(e) => setActiveSessionId(e.target.value === "live" ? null : Number(e.target.value))}
+            className="bg-background border border-input rounded px-2 py-1 text-foreground font-medium focus:outline-none focus:ring-2 focus:ring-ring/20"
+          >
+            <option value="live">Latest (live data)</option>
+            {sessions.map(s => (
+              <option key={s.id} value={s.id}>
+                {s.label} — {new Date(s.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+              </option>
+            ))}
+          </select>
+          {activeSession ? (
+            <>
+              <span className="rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 text-[10px] font-medium">
+                Viewing archived snapshot — read-only
+              </span>
+              <button
+                onClick={() => {
+                  if (confirm(`Delete session "${activeSession.label}"? This cannot be undone.`)) {
+                    deleteSessionMutation.mutate(activeSession.id);
+                  }
+                }}
+                className="ml-auto inline-flex items-center gap-1 rounded-md text-destructive hover:bg-destructive/10 px-2 py-1 text-[11px]"
+              >
+                <Trash2 className="h-3 w-3" /> Delete session
+              </button>
+            </>
+          ) : (
+            <>
+              {sessions.length > 0 && (
+                <span className="text-muted-foreground">
+                  {sessions.length} archived session{sessions.length === 1 ? "" : "s"}
+                </span>
+              )}
+              <button
+                onClick={() => {
+                  const label = prompt(
+                    `Save the current Sprint Data as Session ${sessions.length + 1}?\nLabel (optional, defaults to "Sprint ${sessions.length + 1}"):`,
+                    `Sprint ${sessions.length + 1}`,
+                  );
+                  if (label !== null) snapshotMutation.mutate(label || undefined);
+                }}
+                disabled={snapshotMutation.isPending}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                title="Snapshot the current Sprint Data as a session. Use this before a re-sync if you want to preserve current results."
+              >
+                {snapshotMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                Save as new session
+              </button>
+            </>
+          )}
+        </section>
+
         {/* Tabs */}
         <div className="flex items-center gap-1 border-b border-border">
           {([
@@ -895,9 +1074,10 @@ export default function CompanyDetailPage() {
 
         {tab === "sprint" && (
           <SprintDataTab
-            company={c}
+            company={mergeWithSession(c, activeSession)}
             onSaveObservations={(text) => observationsMutation.mutate(text)}
             savingObservations={observationsMutation.isPending}
+            readOnly={activeSession !== null}
           />
         )}
 

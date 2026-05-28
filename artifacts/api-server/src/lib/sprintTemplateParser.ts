@@ -67,6 +67,12 @@ export type ParsedTemplate = {
   revenueLastMonthMrr: string | null;
   /** Optional — Team size if present. */
   teamSize: number | null;
+  /** Optional — Metrics tab: Quantifiable goal for the next stage. */
+  nextStageGoal: string | null;
+  /** Optional — Metrics tab: Runway for the next stage (post funding). */
+  nextStageRunway: string | null;
+  /** Optional — Metrics tab: Funds for (broader what needs to be built). */
+  fundsFor: string | null;
   /**
    * Detected workflow stage based on which sheets had content.
    *   'pre_sprint' — only Overview filled
@@ -169,6 +175,16 @@ const KNOWN_LABELS: string[] = [
   "SMART Goal (3 months)", "SMART Goal 3 months", "SMART Goal - 3 months", "3 month SMART Goal",
   "Last 12 Months Revenue", "Last Month Revenue (MRR)", "Last Month Revenue", "MRR",
   "Team Size",
+  // Metrics tab (v5.1)
+  "Quantifiable goal for the next stage of the startup",
+  "Quantifiable goal for the next stage",
+  "Quantifiable goal",
+  "Runway for the next stage (post funding)",
+  "Runway for the next stage",
+  "Runway post funding",
+  "Funds for (broader what needs to be built)",
+  "Funds for",
+  "Use of Funds",
 ];
 function normalizeLabel(s: string): string {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -180,6 +196,55 @@ const KNOWN_LABEL_SET = new Set(KNOWN_LABELS.map(normalizeLabel));
 function looksLikeLabel(cell: string | null | undefined): boolean {
   if (!cell) return false;
   return KNOWN_LABEL_SET.has(normalizeLabel(cell));
+}
+
+/**
+ * STRICT below-only lookup. Finds a cell matching one of the labels, then
+ * returns the value in the row immediately below in the SAME column. Used
+ * for Funding fields where the answer is always on the next row (not to
+ * the right).
+ *
+ * Still guarded by `looksLikeLabel` so we never return a label as a value.
+ */
+function findValueBelow(rows: string[][], ...labels: string[]): string | null {
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    for (let c = 0; c < row.length; c++) {
+      const cell = row[c];
+      if (!cell) continue;
+      if (labels.some((l) => labelEq(cell, l) || labelHas(cell, l))) {
+        const below = rows[r + 1]?.[c];
+        if (below && below.trim() && !looksLikeLabel(below)) {
+          return below.trim();
+        }
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * STRICT right-only lookup. Finds a cell matching one of the labels, then
+ * returns the value in the cell to its right on the SAME row. Used for
+ * Metrics fields where the answer is always to the right.
+ */
+function findValueRight(rows: string[][], ...labels: string[]): string | null {
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    for (let c = 0; c < row.length; c++) {
+      const cell = row[c];
+      if (!cell) continue;
+      if (labels.some((l) => labelEq(cell, l) || labelHas(cell, l))) {
+        const right = row[c + 1];
+        if (right && right.trim() && !looksLikeLabel(right)) {
+          return right.trim();
+        }
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 /** Try to coerce a string to a number; return null if NaN. */
@@ -343,6 +408,8 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
   }
 
   // ─── Funding sheet ────────────────────────────────────────────────────
+  // All Funding values sit in the cell DIRECTLY BELOW their label
+  // (column B label → column B next-row value). Confirmed by Rishu in v5.1.
   let fundingStatus: string | null = null;
   let fundAskCr: number | null = null;
   let previousFundraiseCr: string | null = null;
@@ -352,21 +419,44 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
   const fundingWs = findSheet("Funding");
   if (fundingWs) {
     const rows = sheetTo2D(fundingWs);
-    fundingStatus = findValueByLabel(rows, "Current funding status");
-    fundAskCr = num(findValueByLabel(rows, "Fund Ask  (in crores)", "Fund Ask (in crores)", "Fund Ask in crores"));
-    previousFundraiseCr = findValueByLabel(rows,
+    fundingStatus = findValueBelow(rows, "Current funding status");
+    fundAskCr = num(findValueBelow(rows,
+      "Fund Ask  (in crores)", "Fund Ask (in crores)", "Fund Ask in crores"));
+    previousFundraiseCr = findValueBelow(rows,
       "Previous Fundraise (in CR) if applicable",
       "Previous Fundraise (in CR)",
       "Previous Fundraise");
-    previousFundraiseOrgs = findValueByLabel(rows,
+    previousFundraiseOrgs = findValueBelow(rows,
       "Previous Fundraise Organisations",
       "Previous Fundraise Organizations");
-    currentBurn = findValueByLabel(rows,
+    currentBurn = findValueBelow(rows,
       "Current Burn if applicable",
       "Current Burn",
       "Burn Rate",
       "Burn");
-    runway = findValueByLabel(rows, "Runway");
+    runway = findValueBelow(rows, "Runway");
+  }
+
+  // ─── Metrics sheet (v5.1) ─────────────────────────────────────────────
+  // Three fields, ALL beside the label (column B label → column C value).
+  let nextStageGoal: string | null = null;
+  let nextStageRunway: string | null = null;
+  let fundsFor: string | null = null;
+  const metricsWs = findSheet("Metrics", "Sprint Metrics");
+  if (metricsWs) {
+    const rows = sheetTo2D(metricsWs);
+    nextStageGoal = findValueRight(rows,
+      "Quantifiable goal for the next stage of the startup",
+      "Quantifiable goal for the next stage",
+      "Quantifiable goal");
+    nextStageRunway = findValueRight(rows,
+      "Runway for the next stage (post funding)",
+      "Runway for the next stage",
+      "Runway post funding");
+    fundsFor = findValueRight(rows,
+      "Funds for (broader what needs to be built)",
+      "Funds for",
+      "Use of Funds");
   }
 
   // ─── SMART Goals sheet → actionable steps + 3-month goal + revenue ────
@@ -409,6 +499,7 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
     swot: { keyStrengths, gaps, opportunities, mentorRecommendation, marketAccess },
     funding: { fundingStatus, fundAskCr, previousFundraiseCr, previousFundraiseOrgs, currentBurn, runway },
     smart: { actionableSteps, smartGoal3Months, revenueLast12Months, revenueLastMonthMrr, teamSize },
+    metrics: { nextStageGoal, nextStageRunway, fundsFor },
   };
 
   return {
@@ -440,6 +531,9 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
     revenueLast12Months,
     revenueLastMonthMrr,
     teamSize,
+    nextStageGoal,
+    nextStageRunway,
+    fundsFor,
     detectedStage,
     raw,
     warnings,
