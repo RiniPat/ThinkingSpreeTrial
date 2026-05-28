@@ -153,7 +153,9 @@ STRICT RULES
    (a) omit the sentence/clause that referenced it, OR
    (b) keep the surrounding paragraph but rephrase so the missing field isn't needed.
 4. NEVER leave a literal "[...]" placeholder in the output.
-5. For the post-sprint email, rewrite SWOT/strengths/gaps/actionable lists in PARAGRAPH form, not bullet lists.
+5. For the post-sprint email:
+   (a) Rewrite SWOT strengths, gaps, mentor recommendations, and market access in PARAGRAPH form, not bullet lists.
+   (b) BUT render "Actionable Steps" as a NUMBERED LIST. Preserve each step on its own line with the format "1. <step>", "2. <step>", etc. Split the source text on common separators (newlines, semicolons, commas at clause boundaries) into discrete numbered items. Lead the list with a short framing sentence like "Towards the same, your actionable steps are:" and follow with the list on subsequent lines (one item per line, separated by \\n).
 6. Keep tone warm, professional, India-context appropriate. No emoji.
 7. Subject line should be specific (mentions the company name).
 8. Sign off exactly as in the template: "Regards,\\nTeam Thinking Spree." (pre) or "Best Regards,\\nTeam Thinking Spree." (post).
@@ -175,8 +177,8 @@ export async function generateEmail(kind: EmailKind, ctx: EmailContext): Promise
 
   const genai = new GoogleGenerativeAI(apiKey);
   const model = genai.getGenerativeModel({
-    // gemini-1.5-flash is fast (~2s) and free-tier eligible. Switch to
-    // gemini-1.5-pro for higher quality if quota allows.
+    // gemini-2.5-flash is fast (~2s) and free-tier eligible. Switch to
+    // gemini-2.5-pro for higher quality if quota allows.
     model: "gemini-2.5-flash",
     generationConfig: {
       temperature: 0.7,

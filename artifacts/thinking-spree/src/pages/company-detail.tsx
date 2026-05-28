@@ -48,6 +48,7 @@ type Company = {
   previousFundraiseOrgs: string | null;
   currentBurn: string | null;
   runway: string | null;
+  observationsTsDashboard: string | null;
   excelData: any;
   createdAt: string;
 };
@@ -74,6 +75,7 @@ const EVENT_META: Record<string, { label: string; Icon: React.ElementType; dotCl
   sprint_completed:   { label: "Sprint completed",    Icon: CheckCircle2,  dotCls: "bg-violet-500" },
   post_email_drafted: { label: "Post-email drafted",  Icon: Sparkles,      dotCls: "bg-amber-500" },
   post_email_sent:    { label: "Post-sprint email sent", Icon: Send,       dotCls: "bg-emerald-500" },
+  stage_changed:      { label: "Workflow stage changed", Icon: RefreshCw,  dotCls: "bg-sky-500" },
 };
 
 // ─────────── Sub-component: Tracker ─────────────
@@ -179,9 +181,18 @@ function Tracker({ events, currentStage, onMarkComplete }: {
  * Empty fields are omitted; the entire tab shows an empty state only if
  * NO field across all sections has a value.
  */
-function SprintDataTab({ company }: { company: Company }) {
+function SprintDataTab({ company, onSaveObservations, savingObservations }: {
+  company: Company;
+  onSaveObservations: (text: string) => void;
+  savingObservations: boolean;
+}) {
   const { toast } = useToast();
   const qc = useQueryClient();
+  // Local draft of the observations text. Initialised from the server-side
+  // value; user edits update this in-memory and a Save button persists.
+  // We don't auto-save on every keystroke to avoid spamming the API.
+  const [obs, setObs] = useState<string>(company.observationsTsDashboard ?? "");
+  const obsDirty = obs.trim() !== (company.observationsTsDashboard ?? "").trim();
 
   // Lazy AI summarisation mutation. Triggered by clicking "Generate vision"
   // when there's a raw About-Startup paragraph but no cached vision yet.
@@ -221,21 +232,22 @@ function SprintDataTab({ company }: { company: Company }) {
   );
   const anyContent = hasVision || hasDirection || hasSwot || hasRecos || hasFinancials;
 
-  if (!anyContent) {
-    return (
-      <div className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
-        <FileText className="mx-auto h-10 w-10 text-muted-foreground/40" />
-        <h3 className="mt-3 font-medium text-foreground">No session data yet</h3>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Sprint data will appear here once you fill the SWOT, Funding and SMART Goals tabs
-          in your Google Sheet, then click <strong>Re-sync from Sheet</strong>.
-        </p>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
+      {/* Inline empty banner when no parsed data — keeps the Observations
+          textarea below reachable so the consultant can still take notes
+          before/without a sheet sync. */}
+      {!anyContent && (
+        <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center">
+          <FileText className="mx-auto h-8 w-8 text-muted-foreground/40" />
+          <h3 className="mt-2 font-medium text-foreground">No session data yet</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Sprint data will appear here once you fill the SWOT, Funding and SMART Goals tabs
+            in your Google Sheet, then click <strong>Re-sync from Sheet</strong>. You can still
+            add internal observations below.
+          </p>
+        </div>
+      )}
       {/* ── 1. Vision hero ─────────────────────────────────────────────── */}
       {hasVision && (
         <section
@@ -396,6 +408,53 @@ function SprintDataTab({ company }: { company: Company }) {
           </div>
         </div>
       )}
+
+      {/* ── 6. Observations by TS Team (internal) ───────────────────────
+          Post-sprint internal notes from the Host. Saved on the dashboard
+          (not in the Google Sheet). Passed to Gemini as additional context
+          when generating the post-sprint email so the tone reflects the
+          team's view — but the AI is instructed never to quote it verbatim. */}
+      <SectionHeader icon={FileText} label="Observations by TS Team (internal)" />
+      <div className="rounded-xl border border-border bg-card p-5">
+        <p className="text-xs text-muted-foreground mb-3">
+          Internal use only. Never sent to the founder. Used as background context
+          for the post-sprint email generation.
+        </p>
+        <textarea
+          value={obs}
+          onChange={(e) => setObs(e.target.value)}
+          rows={5}
+          placeholder="Notes from the Host after the sprint session — what stood out, where the founder needs the most support, internal flags..."
+          disabled={savingObservations}
+          className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition leading-relaxed disabled:opacity-60"
+        />
+        <div className="mt-2 flex items-center justify-between">
+          <span className="text-[11px] text-muted-foreground">
+            {obs.length} characters
+            {company.observationsTsDashboard && !obsDirty && " · saved"}
+            {obsDirty && " · unsaved changes"}
+          </span>
+          <div className="flex items-center gap-2">
+            {obsDirty && (
+              <button
+                onClick={() => setObs(company.observationsTsDashboard ?? "")}
+                disabled={savingObservations}
+                className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-60"
+              >
+                Discard
+              </button>
+            )}
+            <button
+              onClick={() => onSaveObservations(obs)}
+              disabled={savingObservations || !obsDirty}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              {savingObservations ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+              Save observations
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Power-user escape hatch: still expose the raw JSON */}
       {company.excelData && (
@@ -573,6 +632,44 @@ export default function CompanyDetailPage() {
     onError: (err: any) => toast({ title: "Delete failed", description: err.message, variant: "destructive" }),
   });
 
+  // Manual workflow stage change. Free-form: forward or backward. Logged
+  // as a `stage_changed` timeline event by the server.
+  const stageMutation = useMutation({
+    mutationFn: async (stage: string) => {
+      const res = await fetch(`${BASE}/api/companies/${id}/stage`, {
+        method: "PATCH", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Stage change failed");
+      return res.json();
+    },
+    onSuccess: (_, stage) => {
+      toast({ title: "Workflow stage updated", description: `→ ${stage.replace(/_/g, " ")}` });
+      qc.invalidateQueries({ queryKey: ["company", id] });
+      qc.invalidateQueries({ queryKey: ["companies"] });
+    },
+    onError: (err: any) => toast({ title: "Stage change failed", description: err.message, variant: "destructive" }),
+  });
+
+  // Save TS team post-sprint observations (internal use)
+  const observationsMutation = useMutation({
+    mutationFn: async (observations: string) => {
+      const res = await fetch(`${BASE}/api/companies/${id}/observations`, {
+        method: "PATCH", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ observations }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Save failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Observations saved" });
+      qc.invalidateQueries({ queryKey: ["company", id] });
+    },
+    onError: (err: any) => toast({ title: "Save failed", description: err.message, variant: "destructive" }),
+  });
+
   if (!Number.isFinite(id)) return <Layout><div className="p-10">Invalid company ID</div></Layout>;
   if (isLoading) {
     return (
@@ -713,9 +810,23 @@ export default function CompanyDetailPage() {
                   Delete
                 </button>
               </div>
-              <div className="text-[11px] text-muted-foreground">
-                Workflow: <span className="font-medium text-foreground">{c.stageWorkflow.replace(/_/g, " ")}</span>
-                {c.sourceSheetUrl && <> · <a href={c.sourceSheetUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">Linked sheet</a></>}
+              <div className="text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap">
+                <span>Workflow:</span>
+                <select
+                  value={c.stageWorkflow}
+                  onChange={(e) => stageMutation.mutate(e.target.value)}
+                  disabled={stageMutation.isPending}
+                  className="text-[11px] bg-background border border-input rounded px-1.5 py-0.5 text-foreground font-medium focus:outline-none focus:ring-2 focus:ring-ring/20 disabled:opacity-60"
+                  title="Change the workflow stage — you can move forward or backward freely"
+                >
+                  <option value="pre_sprint">Pre-Sprint</option>
+                  <option value="scheduled">Scheduled</option>
+                  <option value="pre_email_sent">Pre-Email Sent</option>
+                  <option value="sprint_done">Sprint Done</option>
+                  <option value="post_email_sent">Completed</option>
+                </select>
+                {stageMutation.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                {c.sourceSheetUrl && <span>· <a href={c.sourceSheetUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">Linked sheet</a></span>}
               </div>
             </div>
           </div>
@@ -782,7 +893,13 @@ export default function CompanyDetailPage() {
           </section>
         )}
 
-        {tab === "sprint" && <SprintDataTab company={c} />}
+        {tab === "sprint" && (
+          <SprintDataTab
+            company={c}
+            onSaveObservations={(text) => observationsMutation.mutate(text)}
+            savingObservations={observationsMutation.isPending}
+          />
+        )}
 
         {tab === "timeline" && (
           <section className="rounded-xl border border-border bg-card p-6">

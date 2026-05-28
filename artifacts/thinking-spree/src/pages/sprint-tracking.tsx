@@ -186,6 +186,39 @@ export default function SprintTrackingPage() {
   const { data: incubators } = useListIncubators();
   const sprints: Sprint[] = (sprintsData ?? []) as Sprint[];
 
+  // ─── Sprint Template companies (v4.8) ─────────────────────────────────
+  // Top-of-page section listing the Sprint-Template-ingested companies
+  // grouped by cohort, with workflow stage shown for each. This is a
+  // different data source from the legacy `sprints` table below — these
+  // are the new-style companies with stageWorkflow + Google Sheets sync.
+  type SprintCompany = {
+    id: number;
+    companyName: string;
+    founderName: string;
+    cohortName: string | null;
+    stageWorkflow: string;
+    sprintHost: string | null;
+  };
+  const companiesQuery = useQuery<{ companies: SprintCompany[] }>({
+    queryKey: ["/api/companies"],
+    queryFn: () => customFetch(`${BASE}/api/companies`, { credentials: "include" }),
+    staleTime: 30_000,
+  });
+  const sprintCompanies = companiesQuery.data?.companies ?? [];
+  const companiesByCohort = useMemo(() => {
+    const map = new Map<string, SprintCompany[]>();
+    for (const c of sprintCompanies) {
+      const key = c.cohortName ?? "Uncategorised";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(c);
+    }
+    return Array.from(map.entries()).sort(([a],[b]) => {
+      if (a === "Uncategorised") return 1;
+      if (b === "Uncategorised") return -1;
+      return a.localeCompare(b);
+    });
+  }, [sprintCompanies]);
+
   // ─── Filter state — mirrors Sheet Tracking columns ─────────────────────
   const [searchText, setSearchText]   = useState("");
   const [status, setStatus]           = useState<"all"|"scheduled"|"completed"|"cancelled">("all");
@@ -340,6 +373,47 @@ export default function SprintTrackingPage() {
           <div className="space-y-3">{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)}</div>
         ) : (
           <>
+            {/* ─── Sprint Template Companies (v4.8) ─────────────────────────
+                Top section: companies ingested via Google Sheets / Sprint Template,
+                grouped by cohort, showing current workflow stage. Each row links
+                directly into the company detail page where the consultant can
+                change the stage. */}
+            {sprintCompanies.length > 0 && (
+              <section className="mb-6 bg-card border border-card-border rounded-xl overflow-hidden">
+                <header className="flex items-center justify-between border-b border-border px-5 py-3 bg-muted/30">
+                  <div>
+                    <h2 className="text-sm font-semibold text-foreground">Companies by Cohort</h2>
+                    <p className="text-[11px] text-muted-foreground">Workflow stage updates as you send emails / move stages on the company page.</p>
+                  </div>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">{sprintCompanies.length} total</span>
+                </header>
+                <div className="divide-y divide-border">
+                  {companiesByCohort.map(([cohort, cos]) => (
+                    <div key={cohort} className="px-5 py-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{cohort}</h3>
+                        <span className="text-[10px] text-muted-foreground">· {cos.length}</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                        {cos.map(c => (
+                          <a key={c.id} href={`/companies/${c.id}`}
+                             className="flex items-center justify-between gap-3 rounded-md border border-border bg-background/60 px-3 py-2 text-xs hover:bg-muted/50 transition">
+                            <div className="min-w-0">
+                              <div className="font-medium text-foreground truncate">{c.companyName}</div>
+                              <div className="text-[11px] text-muted-foreground truncate">
+                                {c.founderName}{c.sprintHost ? ` · Host: ${c.sprintHost}` : ""}
+                              </div>
+                            </div>
+                            <StageBadge stage={c.stageWorkflow} />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
             <StatsStrip sprints={sorted} />
 
             {/* ─── Filter bar (matches Sheet Tracking) ─── */}
@@ -607,5 +681,23 @@ function SprintTable({
         </table>
       </div>
     </div>
+  );
+}
+
+/** Compact badge for the Companies-by-Cohort section. Maps each workflow
+ *  stage to a small color-coded chip. */
+function StageBadge({ stage }: { stage: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    pre_sprint:      { label: "Pre-Sprint",   cls: "bg-amber-50 text-amber-800 border-amber-200" },
+    scheduled:       { label: "Scheduled",     cls: "bg-sky-50 text-sky-800 border-sky-200" },
+    pre_email_sent:  { label: "Pre-Email",     cls: "bg-blue-50 text-blue-800 border-blue-200" },
+    sprint_done:     { label: "Sprint Done",   cls: "bg-violet-50 text-violet-800 border-violet-200" },
+    post_email_sent: { label: "Completed",     cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  };
+  const c = map[stage] ?? { label: stage.replace(/_/g, " "), cls: "bg-muted text-muted-foreground border-border" };
+  return (
+    <span className={`whitespace-nowrap inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${c.cls}`}>
+      {c.label}
+    </span>
   );
 }

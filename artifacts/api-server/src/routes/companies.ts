@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { db, foundersTable, incubatorsTable, companyEventsTable, emailDraftsTable, usersTable } from "@workspace/db";
+import { db, foundersTable, incubatorsTable, companyEventsTable, emailDraftsTable, usersTable, isValidWorkflowStage } from "@workspace/db";
 import { eq, and, desc, asc, sql } from "drizzle-orm";
 import { parseSprintTemplate, parseSprintTemplateWorkbook } from "../lib/sprintTemplateParser";
 import { fetchSheetAsWorkbook, extractSheetId } from "../lib/sheetsFetcher";
@@ -120,6 +120,7 @@ router.get("/companies/:id", async (req, res) => {
         previousFundraiseOrgs: foundersTable.previousFundraiseOrgs,
         currentBurn: foundersTable.currentBurn,
         runway: foundersTable.runway,
+        observationsTsDashboard: foundersTable.observationsTsDashboard,
         excelData: foundersTable.excelData,
         createdAt: foundersTable.createdAt,
       })
@@ -523,6 +524,81 @@ router.delete("/companies/:id", async (req, res) => {
   } catch (err) {
     req.log.error({ err }, "Failed to delete company");
     res.status(500).json({ error: "Failed to delete company" });
+  }
+});
+
+// ─── PATCH /companies/:id/stage — manually set workflow stage ────────────
+/**
+ * Body: { stage: WorkflowStage }
+ *
+ * Free-form: consultants can go forward or backward freely. The system
+ * never blocks a stage change. The auto-advance from email sending still
+ * works as before — this endpoint is for manual edits.
+ *
+ * Logs a "stage_changed" timeline event so the audit trail captures who
+ * moved a company from X to Y and when.
+ */
+router.patch("/companies/:id/stage", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const id = Number(req.params.id);
+  const stage = String(req.body?.stage ?? "").trim();
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  if (!isValidWorkflowStage(stage)) { res.status(400).json({ error: "Invalid stage" }); return; }
+
+  try {
+    const [c] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    if (!c) { res.status(404).json({ error: "Company not found" }); return; }
+    if (c.ownerId && c.ownerId !== userId) { res.status(403).json({ error: "Not authorized" }); return; }
+
+    const previous = c.stageWorkflow;
+    if (previous === stage) {
+      res.json({ ok: true, unchanged: true });
+      return;
+    }
+
+    await db.update(foundersTable).set({ stageWorkflow: stage }).where(eq(foundersTable.id, id));
+    await db.insert(companyEventsTable).values({
+      founderId: id, userId,
+      kind: "stage_changed",
+      note: `Stage manually changed: ${previous} → ${stage}`,
+      metadata: { from: previous, to: stage },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Failed to set workflow stage");
+    res.status(500).json({ error: "Failed to set workflow stage" });
+  }
+});
+
+// ─── PATCH /companies/:id/observations — set TS team observations ────────
+/**
+ * Body: { observations: string }
+ *
+ * Plain-text observations written by the Host after the sprint session.
+ * Internal use only — never sent to the founder. Surfaces on the Sprint
+ * Data tab and is passed to Gemini as additional context when generating
+ * the post-sprint email (so the email can subtly reflect the team's view).
+ */
+router.patch("/companies/:id/observations", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  // Allow empty string to clear the observations.
+  const observations = typeof req.body?.observations === "string" ? req.body.observations : "";
+
+  try {
+    const [c] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    if (!c) { res.status(404).json({ error: "Company not found" }); return; }
+    if (c.ownerId && c.ownerId !== userId) { res.status(403).json({ error: "Not authorized" }); return; }
+
+    await db.update(foundersTable)
+      .set({ observationsTsDashboard: observations.trim() || null })
+      .where(eq(foundersTable.id, id));
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Failed to save observations");
+    res.status(500).json({ error: "Failed to save observations" });
   }
 });
 

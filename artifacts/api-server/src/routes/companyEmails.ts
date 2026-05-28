@@ -106,6 +106,8 @@ async function buildContext(userId: number, companyId: number, extraNotes?: stri
       mentorRecommendation: foundersTable.mentorRecommendation,
       marketAccess: foundersTable.marketAccess,
       thinkingSheetUrl: foundersTable.thinkingSheetUrl,
+      sourceSheetUrl: foundersTable.sourceSheetUrl,
+      observationsTsDashboard: foundersTable.observationsTsDashboard,
       cohortName: incubatorsTable.name,
       excelData: foundersTable.excelData,
     })
@@ -124,6 +126,17 @@ async function buildContext(userId: number, companyId: number, extraNotes?: stri
 
   const { day, date, time } = await findSprintCalendarEvent(userId, c.companyName);
 
+  // Merge TS team observations into the freeform notes the consultant can
+  // optionally pass in. The observations are internal; we phrase them as
+  // "context to consider" so Gemini doesn't paste them verbatim into the
+  // email — they should influence tone, not appear word-for-word.
+  const mergedNotes = [
+    c.observationsTsDashboard?.trim()
+      ? `Internal Thinking Spree team observations (DO NOT quote or include verbatim — use only to shape tone and emphasis):\n${c.observationsTsDashboard.trim()}`
+      : null,
+    extraNotes?.trim() ? `Additional notes from the consultant for this email:\n${extraNotes.trim()}` : null,
+  ].filter(Boolean).join("\n\n");
+
   return {
     companyName: c.companyName,
     founderName: c.founderName,
@@ -140,8 +153,9 @@ async function buildContext(userId: number, companyId: number, extraNotes?: stri
     actionableSteps,
     mentorRecommendation: c.mentorRecommendation,
     marketAccess: c.marketAccess,
-    thinkingSheetUrl: c.thinkingSheetUrl,
-    extraNotes,
+    // Thinking Sheet IS the source sheet URL — per team workflow.
+    thinkingSheetUrl: c.thinkingSheetUrl ?? c.sourceSheetUrl,
+    extraNotes: mergedNotes || undefined,
   };
 }
 

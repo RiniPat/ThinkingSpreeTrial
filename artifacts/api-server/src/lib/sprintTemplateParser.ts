@@ -119,23 +119,67 @@ function findValueByLabel(rows: string[][], ...labels: string[]): string | null 
       const cell = row[c];
       if (!cell) continue;
       if (labels.some((l) => labelEq(cell, l) || labelHas(cell, l))) {
-        // Try right
+        // Try right first
         const right = row[c + 1];
         if (right && right.trim()) return right.trim();
-        // Try below
+        // Try below — but reject the value if the cell below is itself a
+        // known label. Without this guard, an empty value cell would cause
+        // us to "fall through" and return the next row's LABEL as if it
+        // were our value. This was a real bug — e.g. asking for "Current
+        // Burn" with an empty value cell would return the string "Runway"
+        // because Runway is the label on the next row.
         const below = rows[r + 1]?.[c];
-        if (below && below.trim()) return below.trim();
+        if (below && below.trim() && !looksLikeLabel(below)) {
+          return below.trim();
+        }
       }
     }
   }
   return null;
 }
 
-/** Join non-empty cells of a multi-cell answer into one paragraph. */
-function joinNonEmpty(parts: (string | null | undefined)[], sep = " "): string | null {
-  const cleaned = parts.map((p) => (p ?? "").trim()).filter(Boolean);
-  if (cleaned.length === 0) return null;
-  return cleaned.join(sep);
+/**
+ * Known labels that appear on the Sprint Template across all sheets. We
+ * use this list to avoid the classic "below cell is empty so I'll return
+ * the cell below THAT" trap — which previously caused e.g. "Current Burn"
+ * to return "Runway" (the label of the row below it) when the burn cell
+ * itself was blank.
+ *
+ * Comparison is normalized — lowercase, single-spaced, trimmed.
+ */
+const KNOWN_LABELS: string[] = [
+  "Company Name", "Company",
+  "Founder's Name", "Founder Name", "Founders Name",
+  "Founder's Email", "Founder Email", "Founders Email", "Email",
+  "Attachment of their Deck/ Information about them", "Attachment of their Deck", "Deck",
+  "Cohort", "Incubator", "Program",
+  "T-Sprint Consultants Assigned", "T-Sprint Consultant Assigned", "Consultant Assigned", "Consultants Assigned",
+  "TSprint organised by", "T-Sprint organised by", "Sprint organised by", "Organised by", "Co-Host", "Co Host",
+  "Direction",
+  "Key Strengths", "Gaps", "Opportunities", "Threats",
+  "Mentor Connect", "Expert 1:1", "Office hour Support",
+  "Market Access", "Market Connect",
+  "Current funding status",
+  "Fund Ask  (in crores)", "Fund Ask (in crores)", "Fund Ask in crores",
+  "Previous Fundraise (in CR) if applicable", "Previous Fundraise (in CR)", "Previous Fundraise",
+  "Previous Fundraise Organisations", "Previous Fundraise Organizations",
+  "Current Burn if applicable", "Current Burn", "Burn Rate", "Burn",
+  "Runway",
+  "Actionable Task", "Actionable Tasks", "Actionable Steps",
+  "SMART Goal (3 months)", "SMART Goal 3 months", "SMART Goal - 3 months", "3 month SMART Goal",
+  "Last 12 Months Revenue", "Last Month Revenue (MRR)", "Last Month Revenue", "MRR",
+  "Team Size",
+];
+function normalizeLabel(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+const KNOWN_LABEL_SET = new Set(KNOWN_LABELS.map(normalizeLabel));
+
+/** Returns true if the cell's value matches a known label string. We use
+ *  this to reject "label-as-value" pollution from below-cell scanning. */
+function looksLikeLabel(cell: string | null | undefined): boolean {
+  if (!cell) return false;
+  return KNOWN_LABEL_SET.has(normalizeLabel(cell));
 }
 
 /** Try to coerce a string to a number; return null if NaN. */
@@ -348,7 +392,12 @@ export function parseSprintTemplateWorkbook(wb: XLSX.WorkBook): ParsedTemplate {
   // ─── Detect stage ─────────────────────────────────────────────────────
   // If any of the post-session fields are filled, we treat the upload as a
   // post-sprint payload. Otherwise it's pre-sprint.
-  const postSessionSignals = [keyStrengths, gaps, opportunities, mentorRecommendation, marketAccess, direction, actionableSteps];
+  // Stage detection: only SWOT-and-recommendation fields signal the sprint
+  // actually happened. Direction (from Milestones) and `actionableSteps`
+  // can sometimes be filled by the consultant BEFORE the sprint as part of
+  // initial sheet setup, so they're not reliable indicators on their own.
+  // The SWOT block is only ever filled during/after the session.
+  const postSessionSignals = [keyStrengths, gaps, mentorRecommendation, marketAccess];
   const detectedStage: ParsedTemplate["detectedStage"] = postSessionSignals.some((v) => v && v.trim().length > 0)
     ? "sprint_done"
     : "pre_sprint";

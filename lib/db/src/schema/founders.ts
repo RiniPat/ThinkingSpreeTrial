@@ -91,6 +91,10 @@ export const foundersTable = pgTable("founders", {
   previousFundraiseCr: text("previous_fundraise_cr"),
   // Runway as raw text (e.g. "8 months", "Until Q3 2026").
   runway: text("runway"),
+  // Internal post-sprint observations written by the Host after the session.
+  // Lives only on the dashboard (not in the Google Sheet). Surfaced on the
+  // Sprint Data tab and used as additional context for the post-sprint email.
+  observationsTsDashboard: text("observations_ts_dashboard"),
   // -----------------------------------------------------------------------
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
