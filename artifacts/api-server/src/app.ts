@@ -10,6 +10,16 @@ import { pool } from "@workspace/db";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
+// Process-level crash handlers. When the server dies without these, Render
+// just shows "service restarted" with no clue why. Logging the error to
+// stderr ensures it lands in the Render logs before the process exits.
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err }, "uncaughtException — process will exit");
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error({ reason }, "unhandledRejection — request likely failed silently");
+});
+
 const app: Express = express();
 
 app.use(

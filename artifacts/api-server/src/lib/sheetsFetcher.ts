@@ -1,131 +1,140 @@
 /**
  * Fetches a Google Sheet by URL and feeds it into the existing
- * Sprint Template parser. We support two access modes:
+ * Sprint Template parser.
  *
- *   1. Private sheets — using the consultant's OAuth token. The consultant
- *      must have at least Viewer access to the sheet for this to work.
+ * v4.5 rewrite: uses the lightweight Sheets `values` API instead of the
+ * heavy `spreadsheets.get(includeGridData=true)` path. The grid-data path
+ * returns full cell metadata (formatting, formulas, borders, ~3-5 KB per
+ * cell) which can balloon a small-looking sheet into a 100+ MB JSON
+ * response and OOM-crash a free-tier Node process.
  *
- *   2. Public sheets — anyone-with-link Viewer. We fall back to an unauthed
- *      request via the Sheets v4 API using an API key OR the consultant's
- *      token (the latter works fine for public sheets too).
- *
- * Both paths produce the same XLSX-style workbook object that the existing
- * parseSprintTemplate() expects.
+ * The values API returns only display strings — typically <1 KB per sheet
+ * even for pages with hundreds of rows. We bound the fetch range to
+ * A1:Z200 per sheet (well past the Sprint Template's actual data area)
+ * so totals stay predictable regardless of how many empty rows the
+ * source sheet contains.
  */
 
-import { google, sheets_v4 } from "googleapis";
+import { google } from "googleapis";
 import XLSX from "xlsx";
 import { getAuthedClient } from "./google";
 
 /**
- * Extracts the spreadsheet ID from any standard Google Sheets URL. Returns
- * null if the URL doesn't look like a Sheets URL.
- *
- * Accepted formats:
- *   https://docs.google.com/spreadsheets/d/{ID}/edit
- *   https://docs.google.com/spreadsheets/d/{ID}/edit#gid=0
- *   https://docs.google.com/spreadsheets/d/{ID}
- *   {ID}                                      (bare ID)
+ * Extract the spreadsheet ID from any standard Google Sheets URL.
+ * Accepts the full URL, the URL with #gid, or a bare ID.
  */
 export function extractSheetId(input: string): string | null {
   const s = (input ?? "").trim();
   if (!s) return null;
-
-  // Bare ID heuristic — Sheets IDs are ~44 chars of [A-Za-z0-9_-]
   if (/^[A-Za-z0-9_-]{20,80}$/.test(s)) return s;
-
   const m = s.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
   return m ? m[1] : null;
 }
 
-/**
- * Fetch a Google Sheet using the consultant's OAuth client. Returns an XLSX
- * Workbook so it can be passed straight to parseSprintTemplate().
- *
- * Strategy: call spreadsheets.get(includeGridData=true) once — gets every
- * tab with its formatted cell values in a single round-trip. Then convert
- * each Google sheet into an XLSX worksheet manually.
- *
- * Throws with a helpful message if access is denied, the sheet doesn't
- * exist, or the URL is malformed.
- */
+// Bound the fetch to avoid OOM on free-tier hosts and protect against
+// pre-formatted empty templates that report thousands of "rows".
+// A1:Z200 is generous — every Sprint Template tab fits in well under
+// 50 rows and 10 columns of real data.
+const MAX_RANGE = "A1:Z200";
+
 export async function fetchSheetAsWorkbook(
   userId: number,
   sheetUrlOrId: string,
 ): Promise<XLSX.WorkBook> {
   const id = extractSheetId(sheetUrlOrId);
   if (!id) {
-    throw new Error("That doesn't look like a Google Sheets URL. Paste the full URL or just the spreadsheet ID.");
+    throw new Error(
+      "That doesn't look like a Google Sheets URL. Paste the full URL or just the spreadsheet ID.",
+    );
   }
 
   const client = await getAuthedClient(userId);
   if (!client) {
     throw new Error(
-      "Google isn't connected for this account. Open Settings → Google Connections and connect Sheets access."
+      "Google isn't connected for this account. Open Settings → Google Connections and connect Sheets access.",
     );
   }
 
-  // Acquire a fresh access token. The googleapis client refreshes
-  // automatically when it sees a 401, but doing it once upfront gives us a
-  // cleaner error if the user's tokens are missing entirely.
   const sheets = google.sheets({ version: "v4", auth: client });
 
-  let res: sheets_v4.Schema$Spreadsheet;
+  // ── Step 1: tiny metadata-only call to get sheet titles ───────────────
+  // No grid data — just the sheet titles. Returns ~1 KB regardless of
+  // sheet size.
+  let titles: string[];
   try {
-    const r = await sheets.spreadsheets.get({
+    const meta = await sheets.spreadsheets.get({
       spreadsheetId: id,
-      // includeGridData=true asks Google to return every cell value in the
-      // same call. For a Sprint Template (~7 tabs × ~50 rows × ~10 cols)
-      // this is a few KB — well within the response limits.
-      includeGridData: true,
+      // fields= mask drops everything except sheet titles, so the response
+      // is tiny even for a sheet with 50 tabs.
+      fields: "sheets.properties.title",
     });
-    res = r.data;
+    titles = (meta.data.sheets ?? [])
+      .map((s) => s.properties?.title)
+      .filter((t): t is string => Boolean(t));
   } catch (err: any) {
     const code = err?.response?.status ?? err?.code;
     if (code === 404) {
-      throw new Error("Sheet not found. Check the URL or that the sheet is shared with your Google account (Viewer is enough).");
+      throw new Error(
+        "Sheet not found. Check the URL or that the sheet is shared with your Google account (Viewer is enough).",
+      );
     }
     if (code === 403) {
-      throw new Error("Access denied. Either share the sheet with your Google account (any access ≥ Viewer), or set link sharing to 'Anyone with the link'.");
+      throw new Error(
+        "Access denied. Either share the sheet with your Google account (Viewer is enough) or set link sharing to 'Anyone with the link'.",
+      );
     }
     if (code === 401) {
-      throw new Error("Google authorization expired. Sign out and sign in again with Google to refresh your tokens.");
+      throw new Error(
+        "Google authorization expired. Sign out and sign in again with Google to refresh your tokens.",
+      );
     }
     throw new Error(err?.message || "Failed to fetch the Google Sheet.");
   }
 
-  // Build an XLSX workbook from the Google sheet data.
-  const wb = XLSX.utils.book_new();
-
-  for (const sheet of res.sheets ?? []) {
-    const title = sheet.properties?.title ?? "Sheet1";
-    const grid = sheet.data?.[0]?.rowData ?? [];
-
-    // Convert grid → 2D array of cell values. The parser is forgiving about
-    // empty cells, so we coerce nulls/missing to empty string.
-    const rows: (string | number | null)[][] = grid.map(row =>
-      (row.values ?? []).map(cell => {
-        if (cell == null) return "";
-        // formattedValue is what the user sees in the cell — for things like
-        // "₹50,00,000" we want the display string, not the raw number.
-        const v = cell.formattedValue;
-        if (v != null) return v;
-        const ev = cell.effectiveValue;
-        if (!ev) return "";
-        if (ev.stringValue != null) return ev.stringValue;
-        if (ev.numberValue != null) return ev.numberValue;
-        if (ev.boolValue != null) return ev.boolValue ? "TRUE" : "FALSE";
-        if (ev.errorValue != null) return "";  // skip #DIV/0! etc.
-        return "";
-      })
-    );
-
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
+  if (titles.length === 0) {
+    throw new Error("The sheet appears to be empty (no tabs).");
   }
 
-  if ((wb.SheetNames ?? []).length === 0) {
-    throw new Error("The sheet appears to be empty.");
+  // ── Step 2: batch fetch values for all tabs in one call ───────────────
+  // values.batchGet returns only display strings, no formatting metadata.
+  // We cap each range at A1:Z200. Even if the source sheet has 10,000
+  // rows of empty pre-formatted cells, we only see the first 200 — which
+  // is well past where Sprint Template data lives.
+  const ranges = titles.map((t) => `'${t.replace(/'/g, "''")}'!${MAX_RANGE}`);
+
+  let valuesPerSheet: (string[] | undefined)[][];
+  try {
+    const batch = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId: id,
+      ranges,
+      // FORMATTED_VALUE = what you'd see in the cell (e.g. "₹50,00,000")
+      valueRenderOption: "FORMATTED_VALUE",
+      // dateTimeRenderOption defaults to SERIAL_NUMBER but with
+      // FORMATTED_VALUE it gets ignored anyway.
+    });
+    valuesPerSheet = (batch.data.valueRanges ?? []).map(
+      (vr) => (vr.values as string[][] | undefined) ?? [],
+    );
+  } catch (err: any) {
+    const code = err?.response?.status ?? err?.code;
+    if (code === 403) {
+      throw new Error(
+        "Access denied while reading sheet data. Share the sheet with your Google account, or set link sharing to 'Anyone with the link'.",
+      );
+    }
+    throw new Error(err?.message || "Failed to read sheet data.");
+  }
+
+  // ── Step 3: build an XLSX workbook from the values ──────────────────
+  // aoa_to_sheet just needs a 2D array. The values API gives us exactly
+  // that. We never allocate large objects, so memory stays flat.
+  const wb = XLSX.utils.book_new();
+  for (let i = 0; i < titles.length; i++) {
+    const title = titles[i];
+    const rows = (valuesPerSheet[i] ?? []) as (string | number | null)[][];
+    const ws = XLSX.utils.aoa_to_sheet(rows.length > 0 ? rows : [[""]]);
+    // Sheet names in xlsx can't exceed 31 chars — same as Google's limit.
+    XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
   }
 
   return wb;
