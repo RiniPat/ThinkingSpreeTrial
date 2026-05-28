@@ -14,6 +14,11 @@ import SprintTrackingPage from "@/pages/sprint-tracking";
 import SettingsPage from "@/pages/settings";
 import AdminImportPage from "@/pages/admin/import";
 import AdminTeamPage from "@/pages/admin/team";
+import AdminRolesPage from "@/pages/admin/roles";
+import ResearchPage from "@/pages/research";
+import SalesLeadsPage from "@/pages/sales-leads";
+import LinkedInOutreachPage from "@/pages/linkedin-outreach";
+import ProposalBuilderPage from "@/pages/proposal-builder";
 import { customFetch } from "@workspace/api-client-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -88,6 +93,21 @@ function Router() {
       </Route>
       <Route path="/admin/team">
         <AuthGuard><AdminTeamPage /></AuthGuard>
+      </Route>
+      <Route path="/admin/roles">
+        <AuthGuard><AdminRolesPage /></AuthGuard>
+      </Route>
+      <Route path="/research">
+        <AuthGuard><ResearchPage /></AuthGuard>
+      </Route>
+      <Route path="/sales/leads">
+        <AuthGuard><SalesLeadsPage /></AuthGuard>
+      </Route>
+      <Route path="/sales/linkedin">
+        <AuthGuard><LinkedInOutreachPage /></AuthGuard>
+      </Route>
+      <Route path="/sales/proposals">
+        <AuthGuard><ProposalBuilderPage /></AuthGuard>
       </Route>
       <Route component={NotFound} />
     </Switch>

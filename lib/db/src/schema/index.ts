@@ -6,3 +6,6 @@ export * from "./emailLogs";
 export * from "./googleTokens";
 export * from "./companyEvents";
 export * from "./emailDrafts";
+export * from "./researchOutputs";
+export * from "./salesLeads";
+export * from "./proposals";

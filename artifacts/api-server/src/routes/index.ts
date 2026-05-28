@@ -13,6 +13,7 @@ import aiAutomationRouter from "./ai-automation";
 import companiesRouter from "./companies";
 import companyEmailsRouter from "./companyEmails";
 import dashboardStatsRouter from "./dashboardStats";
+import researchWorkspaceRouter from "./researchWorkspace";
 
 const router: IRouter = Router();
 
@@ -30,5 +31,6 @@ router.use(aiAutomationRouter);
 router.use(companiesRouter);
 router.use(companyEmailsRouter);
 router.use(dashboardStatsRouter);
+router.use(researchWorkspaceRouter);
 
 export default router;

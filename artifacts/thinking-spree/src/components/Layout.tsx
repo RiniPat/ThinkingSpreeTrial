@@ -1,6 +1,7 @@
 import { Link, useLocation } from "wouter";
 import { useLogout, useGetMe } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { customFetch } from "@workspace/api-client-react";
 import {
   LayoutDashboard,
   Briefcase,
@@ -11,20 +12,48 @@ import {
   X,
   Activity,
   Upload,
+  Sparkles,
+  Linkedin,
+  FileText,
+  Users,
+  Shield,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import logoPath from "@assets/thinkingspree_logo_1778683092464.jpg";
 
-type NavItem = { href: string; label: string; icon: any; adminOnly?: boolean };
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+type NavItem = {
+  href: string;
+  label: string;
+  icon: any;
+  // Visibility gates. Default = visible to everyone.
+  adminOnly?: boolean;
+  needsResearch?: boolean;   // hidden unless canAccessResearch
+  needsSales?: boolean;      // hidden unless canAccessSales
+  group?: string;            // group heading shown above the item
+};
 
 const navItems: NavItem[] = [
-  { href: "/dashboard",       label: "Dashboard",       icon: LayoutDashboard },
+  // Workspace group (default, shown to all)
+  { href: "/dashboard",       label: "Dashboard",       icon: LayoutDashboard, group: "Workspace" },
   { href: "/companies",       label: "Companies",       icon: Briefcase },
   { href: "/summary",         label: "Summary Sheet",   icon: BarChart3 },
   { href: "/sprint-tracking", label: "Sprint Tracking", icon: Activity },
-  { href: "/admin/import",    label: "Import Data",     icon: Upload, adminOnly: true },
-  { href: "/settings",        label: "Settings",        icon: Settings },
+
+  // Research group (consultant / research / admin)
+  { href: "/research",        label: "Research",        icon: Sparkles, needsResearch: true, group: "Research" },
+
+  // Sales group (consultant / sales / admin)
+  { href: "/sales/leads",     label: "Sales Leads",     icon: Users,    needsSales: true, group: "Sales" },
+  { href: "/sales/linkedin",  label: "LinkedIn Outreach", icon: Linkedin, needsSales: true },
+  { href: "/sales/proposals", label: "Proposals",       icon: FileText, needsSales: true },
+
+  // Admin group
+  { href: "/admin/import",    label: "Import Data",     icon: Upload, adminOnly: true, group: "Admin" },
+  { href: "/admin/roles",     label: "User Roles",      icon: Shield, adminOnly: true },
+  { href: "/settings",        label: "Settings",        icon: Settings, group: "" },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -33,6 +62,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
   const logoutMutation = useLogout();
   const { data: user } = useGetMe();
+  // Permissions drive sidebar visibility for Research / Sales / Admin groups.
+  // We re-fetch on user change (queryKey includes user id) so role changes
+  // take effect on the next reload.
+  const { data: perms } = useQuery<{
+    role: string;
+    canAccessResearch: boolean;
+    canAccessSales: boolean;
+    canManageRoles: boolean;
+  }>({
+    queryKey: ["/api/me/permissions", (user as any)?.id],
+    queryFn: () => customFetch(`${BASE}/api/me/permissions`, { credentials: "include" }),
+    enabled: !!user,
+    staleTime: 60_000,
+  });
 
   function handleLogout() {
     logoutMutation.mutate(undefined, {
@@ -70,36 +113,64 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </div>
 
       <nav className="flex-1 px-3 py-5 space-y-0.5 overflow-y-auto">
-        <div className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-sidebar-foreground/40">
-          Workspace
-        </div>
-        {navItems
-          .filter(item => !item.adminOnly || (user as any)?.isAdmin)
-          .map(({ href, label, icon: Icon }) => {
-          const active = location === href || (href !== "/dashboard" && location.startsWith(href));
-          return (
-            <Link key={href} href={href}>
-              <a
-                onClick={() => setMobileOpen(false)}
-                className={cn(
-                  "flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors duration-150",
-                  active
-                    ? "bg-sidebar-accent text-white"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-white"
+        {(() => {
+          // Filter items by role-derived permissions. The /me/permissions
+          // endpoint returns the canonical role booleans so the UI doesn't
+          // have to re-derive them.
+          const isAdmin = perms?.role === "admin" || (user as any)?.isAdmin;
+          const canResearch = perms?.canAccessResearch ?? false;
+          const canSales = perms?.canAccessSales ?? false;
+
+          const visible = navItems.filter(item => {
+            if (item.adminOnly && !isAdmin) return false;
+            if (item.needsResearch && !canResearch) return false;
+            if (item.needsSales && !canSales) return false;
+            return true;
+          });
+
+          // Walk through items inserting group headings whenever a new group
+          // starts. The `group` field on the first item of each section is
+          // the heading text.
+          let lastGroup: string | undefined = undefined;
+          return visible.map((item, i) => {
+            const { href, label, icon: Icon, group } = item;
+            const active = location === href || (href !== "/dashboard" && location.startsWith(href));
+            const showHeader = group !== undefined && group !== lastGroup;
+            if (group !== undefined) lastGroup = group;
+            return (
+              <div key={href}>
+                {showHeader && group && (
+                  <div className={cn(
+                    "px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-sidebar-foreground/40",
+                    i > 0 && "pt-3",
+                  )}>
+                    {group}
+                  </div>
                 )}
-              >
-                <Icon size={16} />
-                <span>{label}</span>
-                {active && (
-                  <span
-                    className="ml-auto h-1.5 w-1.5 rounded-full"
-                    style={{ background: "var(--gold)" }}
-                  />
-                )}
-              </a>
-            </Link>
-          );
-        })}
+                <Link href={href}>
+                  <a
+                    onClick={() => setMobileOpen(false)}
+                    className={cn(
+                      "flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors duration-150",
+                      active
+                        ? "bg-sidebar-accent text-white"
+                        : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-white"
+                    )}
+                  >
+                    <Icon size={16} />
+                    <span>{label}</span>
+                    {active && (
+                      <span
+                        className="ml-auto h-1.5 w-1.5 rounded-full"
+                        style={{ background: "var(--gold)" }}
+                      />
+                    )}
+                  </a>
+                </Link>
+              </div>
+            );
+          });
+        })()}
       </nav>
 
       {/* User card — gold avatar disc + sign-out icon. */}
