@@ -14,6 +14,12 @@ import {
   Target, TrendingUp, DollarSign, Lightbulb, Users2, Wallet, Eye, Wand2,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
+import {
+  LineChart as RcLineChart, Line as RcLine,
+  XAxis as RcXAxis, YAxis as RcYAxis,
+  Tooltip as RcTooltip, ResponsiveContainer as RcResponsiveContainer,
+  CartesianGrid as RcCartesianGrid,
+} from "recharts";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -572,7 +578,7 @@ export default function CompanyDetailPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const id = Number(params.id);
-  const [tab, setTab] = useState<"overview" | "sprint" | "timeline">("overview");
+  const [tab, setTab] = useState<"overview" | "sprint" | "compare" | "timeline">("overview");
   const [editingEmail, setEditingEmail] = useState(false);
   const [composer, setComposer] = useState<{ open: boolean; kind: "pre" | "post" }>({ open: false, kind: "pre" });
   const [editOpen, setEditOpen] = useState(false);
@@ -1016,6 +1022,7 @@ export default function CompanyDetailPage() {
           {([
             { key: "overview", label: "Overview" },
             { key: "sprint", label: "Sprint Data" },
+            { key: "compare", label: "Compare Sessions" },
             { key: "timeline", label: "Timeline" },
           ] as const).map(t => (
             <button
@@ -1081,6 +1088,10 @@ export default function CompanyDetailPage() {
           />
         )}
 
+        {tab === "compare" && (
+          <CompareSessionsTab company={c} sessions={sessions} />
+        )}
+
         {tab === "timeline" && (
           <section className="rounded-xl border border-border bg-card p-6">
             <Tracker
@@ -1092,7 +1103,7 @@ export default function CompanyDetailPage() {
         )}
 
         <footer className="pt-2 text-center text-xs text-muted-foreground">
-          Thinking Spree · Consultant Suite v4.4
+          Thinking Spree · Consultant Suite v5.3
         </footer>
       </main>
 
@@ -1182,5 +1193,319 @@ export default function CompanyDetailPage() {
         </div>
       )}
     </Layout>
+  );
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * CompareSessionsTab (v5.3)
+ *
+ * Two views in one tab:
+ *   (1) Side-by-side SWOT/Sprint Data diff between two chosen sessions
+ *   (2) Progression line chart of a chosen metric across all sessions
+ *
+ * "Sessions" here includes the live (current) data as a pseudo-session
+ * labeled "Latest" — appended to the array as the most recent snapshot.
+ * That way the consultant can compare Latest vs Sprint 1 naturally.
+ *
+ * Metrics for the chart come from `excelData.smart` (revenueLast12Months,
+ * revenueLastMonthMrr, teamSize) and from the typed `fundAskCr` column.
+ * Numbers are coerced from strings like "₹2.1 Cr" → 2.1 by stripping
+ * non-numeric characters.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+type ComparableSession = {
+  id: number | "live";
+  label: string;
+  sessionNumber: number;
+  createdAt: string;
+  keyStrength: string | null;
+  gap: string | null;
+  mentorRecommendation: string | null;
+  marketAccess: string | null;
+  smartGoal3Months: string | null;
+  tasks: string | null;
+  previousFundraiseCr: string | null;
+  currentBurn: string | null;
+  runway: string | null;
+  fundsFor: string | null;
+  nextStageGoal: string | null;
+  excelData: any;
+  fundAskCrNumeric: number | null;   // for chart only
+};
+
+/**
+ * Extract a numeric value out of a raw string. Returns null if no digits
+ * are present. "₹2.5 Cr (Pre-seed)" → 2.5; "₹40 L / month" → 40;
+ * "10 months" → 10. The unit context (Cr vs L vs months) is responsibility
+ * of the caller — we just pull the first numeric run.
+ */
+function extractNumber(raw: string | number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  const m = String(raw).match(/-?\d+(?:[.,]\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0].replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
+function toComparable(c: any): ComparableSession {
+  // Used to convert both archived sessions and the live company into a
+  // single shape the rest of the tab can work with.
+  return {
+    id: c.id,
+    label: c.label ?? "Latest",
+    sessionNumber: c.sessionNumber ?? 999_999,
+    createdAt: c.createdAt ?? new Date().toISOString(),
+    keyStrength: c.keyStrength ?? null,
+    gap: c.gap ?? null,
+    mentorRecommendation: c.mentorRecommendation ?? null,
+    marketAccess: c.marketAccess ?? null,
+    smartGoal3Months: c.smartGoal3Months ?? null,
+    tasks: c.tasks ?? null,
+    previousFundraiseCr: c.previousFundraiseCr ?? null,
+    currentBurn: c.currentBurn ?? null,
+    runway: c.runway ?? null,
+    fundsFor: c.fundsFor ?? null,
+    nextStageGoal: c.nextStageGoal ?? null,
+    excelData: c.excelData ?? null,
+    fundAskCrNumeric: extractNumber(c.excelData?.funding?.fundAskCr),
+  };
+}
+
+type MetricKey =
+  | "fundAskCr"
+  | "revenueLast12Months"
+  | "revenueLastMonthMrr"
+  | "teamSize"
+  | "previousFundraiseCr"
+  | "runway"
+  | "currentBurn";
+
+const METRIC_DEFS: { key: MetricKey; label: string; unit: string; pickValue: (s: ComparableSession) => number | null }[] = [
+  { key: "fundAskCr",            label: "Fund Ask",           unit: "₹ Cr",        pickValue: s => s.fundAskCrNumeric ?? extractNumber(s.excelData?.funding?.fundAskCr) },
+  { key: "revenueLast12Months",  label: "Revenue (12mo)",     unit: "raw number",  pickValue: s => extractNumber(s.excelData?.smart?.revenueLast12Months) },
+  { key: "revenueLastMonthMrr",  label: "MRR (last month)",   unit: "raw number",  pickValue: s => extractNumber(s.excelData?.smart?.revenueLastMonthMrr) },
+  { key: "teamSize",             label: "Team Size",          unit: "headcount",   pickValue: s => extractNumber(s.excelData?.smart?.teamSize) },
+  { key: "previousFundraiseCr",  label: "Previous Fundraise", unit: "raw number",  pickValue: s => extractNumber(s.previousFundraiseCr) },
+  { key: "runway",               label: "Runway",             unit: "raw number",  pickValue: s => extractNumber(s.runway) },
+  { key: "currentBurn",          label: "Current Burn",       unit: "raw number",  pickValue: s => extractNumber(s.currentBurn) },
+];
+
+function CompareSessionsTab({ company, sessions }: { company: any; sessions: any[] }) {
+  // Build the canonical list: archived sessions (sorted by number) +
+  // "Latest" pseudo-session at the end. Always include Latest even if
+  // there are zero archived sessions — comparing Latest to itself is
+  // useless, but the UI gracefully handles that case.
+  const archivedComparable: ComparableSession[] = (sessions ?? [])
+    .map(toComparable)
+    .sort((a, b) => a.sessionNumber - b.sessionNumber);
+  const liveComparable: ComparableSession = toComparable({
+    ...company,
+    id: "live" as const,
+    label: "Latest",
+    sessionNumber: (archivedComparable.at(-1)?.sessionNumber ?? 0) + 1,
+    createdAt: new Date().toISOString(),
+  });
+  const all = [...archivedComparable, liveComparable];
+
+  // Default diff picks: Latest vs most recent archived (if any)
+  const defaultLeft = archivedComparable.length > 0 ? archivedComparable.at(-1)!.id : liveComparable.id;
+  const [leftId, setLeftId] = useState<string>(String(defaultLeft));
+  const [rightId, setRightId] = useState<string>("live");
+
+  const left = all.find(s => String(s.id) === leftId);
+  const right = all.find(s => String(s.id) === rightId);
+
+  const [metric, setMetric] = useState<MetricKey>("fundAskCr");
+  const metricDef = METRIC_DEFS.find(m => m.key === metric)!;
+
+  // Chart data — one point per session in chronological order.
+  const chartData = all.map(s => ({
+    name: s.label,
+    value: metricDef.pickValue(s),
+  }));
+  const hasAnyValue = chartData.some(d => d.value !== null);
+
+  if (all.length === 1) {
+    return (
+      <section className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
+        <h3 className="font-medium text-foreground">Only one session exists</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Use <strong>Save as new session</strong> in the bar above to snapshot the current Sprint Data.
+          Once you have at least one archived session, you can compare them here.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* ───── SWOT side-by-side diff ───────────────────────────────── */}
+      <section className="rounded-xl border border-border bg-card overflow-hidden">
+        <header className="px-5 py-3 border-b border-border bg-muted/30 flex items-center gap-3 flex-wrap">
+          <h3 className="font-serif text-lg text-foreground">Side-by-side comparison</h3>
+          <div className="ml-auto flex items-center gap-3 flex-wrap text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground uppercase tracking-wider text-[10px] font-semibold">Left</span>
+              <select value={leftId} onChange={(e) => setLeftId(e.target.value)}
+                className="bg-background border border-input rounded px-2 py-1 text-foreground font-medium">
+                {all.map(s => <option key={s.id} value={String(s.id)}>{s.label}</option>)}
+              </select>
+            </div>
+            <span className="text-muted-foreground">vs</span>
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground uppercase tracking-wider text-[10px] font-semibold">Right</span>
+              <select value={rightId} onChange={(e) => setRightId(e.target.value)}
+                className="bg-background border border-input rounded px-2 py-1 text-foreground font-medium">
+                {all.map(s => <option key={s.id} value={String(s.id)}>{s.label}</option>)}
+              </select>
+            </div>
+          </div>
+        </header>
+
+        {leftId === rightId ? (
+          <div className="p-10 text-center text-sm text-muted-foreground">
+            Pick two different sessions to compare.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/20 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-4 py-3 w-[180px]">Field</th>
+                  <th className="px-4 py-3">{left?.label}</th>
+                  <th className="px-4 py-3">{right?.label}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { key: "keyStrength",          label: "Key Strengths" },
+                  { key: "gap",                   label: "Gaps" },
+                  { key: "mentorRecommendation",  label: "Mentor Connect" },
+                  { key: "marketAccess",          label: "Market Access" },
+                  { key: "smartGoal3Months",      label: "SMART Goal (3mo)" },
+                  { key: "tasks",                  label: "Actionable Tasks" },
+                  { key: "nextStageGoal",          label: "Next Stage Goal" },
+                  { key: "previousFundraiseCr",   label: "Previous Fundraise" },
+                  { key: "currentBurn",            label: "Current Burn" },
+                  { key: "runway",                 label: "Runway" },
+                ].map(field => {
+                  const lVal = (left as any)?.[field.key];
+                  const rVal = (right as any)?.[field.key];
+                  const changed = (lVal ?? "").trim() !== (rVal ?? "").trim();
+                  return (
+                    <tr key={field.key} className={`border-t border-border ${changed ? "" : "opacity-60"}`}>
+                      <td className="px-4 py-3 align-top">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{field.label}</div>
+                        {changed && lVal && rVal && (
+                          <span className="mt-1 inline-block rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 text-[9px] font-medium">
+                            Changed
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <DiffCell value={lVal} otherValue={rVal} />
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <DiffCell value={rVal} otherValue={lVal} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ───── Metric progression chart ─────────────────────────────── */}
+      <section className="rounded-xl border border-border bg-card overflow-hidden">
+        <header className="px-5 py-3 border-b border-border bg-muted/30 flex items-center gap-3 flex-wrap">
+          <h3 className="font-serif text-lg text-foreground">Progression chart</h3>
+          <div className="ml-auto flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground uppercase tracking-wider text-[10px] font-semibold">Metric</span>
+            <select value={metric} onChange={(e) => setMetric(e.target.value as MetricKey)}
+              className="bg-background border border-input rounded px-2 py-1 text-foreground font-medium">
+              {METRIC_DEFS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+            </select>
+          </div>
+        </header>
+
+        {!hasAnyValue ? (
+          <div className="p-10 text-center text-sm text-muted-foreground">
+            <p>No numeric data for <strong>{metricDef.label}</strong> across these sessions.</p>
+            <p className="mt-1 text-xs">Make sure the source sheet has values for this field, and that each session was snapshotted after the data was populated.</p>
+          </div>
+        ) : (
+          <div className="p-5">
+            <SimpleLineChart
+              data={chartData}
+              ySuffix={metricDef.unit === "headcount" ? "" : ""}
+              valueLabel={metricDef.label}
+            />
+            <p className="mt-3 text-[11px] text-muted-foreground text-center">
+              Values extracted numerically from each session's raw text (e.g. "₹2.5 Cr (Pre-seed)" → 2.5).
+              Empty points mean the field was blank in that session.
+            </p>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/** Renders a single cell in the SWOT diff. Shows "—" for empty + a subtle
+ *  tint when the value differs from the other side. */
+function DiffCell({ value, otherValue }: { value: string | null; otherValue: string | null }) {
+  const v = (value ?? "").trim();
+  const o = (otherValue ?? "").trim();
+  if (!v) return <span className="text-muted-foreground/50 italic">—</span>;
+  const changed = v !== o;
+  return (
+    <div className={`whitespace-pre-wrap leading-relaxed text-sm ${changed ? "text-foreground" : "text-muted-foreground"}`}>
+      {v}
+    </div>
+  );
+}
+
+/**
+ * Compact line chart using Recharts. Intentionally minimal — full tooltips,
+ * gridlines, and axes calibrated for short session-count series. Empty
+ * (null) points are connected with a dashed segment to make the gap visible.
+ */
+function SimpleLineChart({ data, valueLabel }: {
+  data: { name: string; value: number | null }[];
+  ySuffix?: string;
+  valueLabel: string;
+}) {
+  return (
+    <div className="w-full h-[280px]">
+      <RcResponsiveContainer width="100%" height="100%">
+        <RcLineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+          <RcCartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+          <RcXAxis dataKey="name" stroke="hsl(var(--muted-foreground))" fontSize={11} />
+          <RcYAxis stroke="hsl(var(--muted-foreground))" fontSize={11} />
+          <RcTooltip
+            contentStyle={{
+              background: "hsl(var(--card))",
+              border: "1px solid hsl(var(--border))",
+              borderRadius: 8,
+              fontSize: 12,
+            }}
+            labelFormatter={(l: any) => `Session: ${l}`}
+            formatter={(v: any) => [v, valueLabel]}
+          />
+          <RcLine
+            type="monotone"
+            dataKey="value"
+            stroke="hsl(222 38% 15%)"
+            strokeWidth={2}
+            dot={{ r: 4, fill: "hsl(222 38% 15%)" }}
+            activeDot={{ r: 6 }}
+            connectNulls={false}
+          />
+        </RcLineChart>
+      </RcResponsiveContainer>
+    </div>
   );
 }
