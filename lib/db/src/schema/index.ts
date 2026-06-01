@@ -10,3 +10,4 @@ export * from "./researchOutputs";
 export * from "./salesLeads";
 export * from "./proposals";
 export * from "./sprintSessions";
+export * from "./growthReports";

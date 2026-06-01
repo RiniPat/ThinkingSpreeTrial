@@ -17,6 +17,7 @@ import researchWorkspaceRouter from "./researchWorkspace";
 import globalSearchRouter from "./globalSearch";
 import sprintSessionsRouter from "./sprintSessions";
 import outcomesReportRouter from "./outcomesReport";
+import builderRouter from "./builderRoutes";
 
 const router: IRouter = Router();
 
@@ -38,5 +39,6 @@ router.use(researchWorkspaceRouter);
 router.use(globalSearchRouter);
 router.use(sprintSessionsRouter);
 router.use(outcomesReportRouter);
+router.use(builderRouter);
 
 export default router;

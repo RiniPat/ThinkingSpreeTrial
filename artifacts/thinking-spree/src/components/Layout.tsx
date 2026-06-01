@@ -15,6 +15,7 @@ import {
   Sparkles,
   Linkedin,
   FileText,
+  FileEdit,
   Users,
   Shield,
   TrendingUp,
@@ -42,6 +43,7 @@ const navItems: NavItem[] = [
   { href: "/dashboard",       label: "Dashboard",       icon: LayoutDashboard, group: "Workspace" },
   { href: "/companies",       label: "Companies",       icon: Briefcase },
   { href: "/summary",         label: "Summary Sheet",   icon: BarChart3 },
+  { href: "/builder",         label: "Builder",         icon: FileEdit, needsResearch: true },
   { href: "/sprint-tracking", label: "Sprint Tracking", icon: Activity },
   { href: "/reports/outcomes", label: "Outcomes Report", icon: TrendingUp, needsResearch: true },
 

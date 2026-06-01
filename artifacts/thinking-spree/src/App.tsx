@@ -20,6 +20,7 @@ import SalesLeadsPage from "@/pages/sales-leads";
 import LinkedInOutreachPage from "@/pages/linkedin-outreach";
 import ProposalBuilderPage from "@/pages/proposal-builder";
 import OutcomesReportPage from "@/pages/outcomes-report";
+import BuilderPage from "@/pages/builder";
 import { customFetch } from "@workspace/api-client-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -112,6 +113,9 @@ function Router() {
       </Route>
       <Route path="/reports/outcomes">
         <AuthGuard><OutcomesReportPage /></AuthGuard>
+      </Route>
+      <Route path="/builder">
+        <AuthGuard><BuilderPage /></AuthGuard>
       </Route>
       <Route component={NotFound} />
     </Switch>
