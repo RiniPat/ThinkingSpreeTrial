@@ -11,4 +11,3 @@ export * from "./salesLeads";
 export * from "./proposals";
 export * from "./sprintSessions";
 export * from "./growthReports";
-export * from "./wadhwaniSummaries";
