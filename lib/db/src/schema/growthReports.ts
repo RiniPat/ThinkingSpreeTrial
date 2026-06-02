@@ -20,6 +20,12 @@ export const growthReportsTable = pgTable("growth_reports", {
   strategicCanvasText: text("strategic_canvas_text"),
   fathom1Text: text("fathom_1_text"),
   fathom2Text: text("fathom_2_text"),
+  /**
+   * Dynamic Fathom transcripts (v5.5+). The old fathom_1_text /
+   * fathom_2_text columns are kept for back-compat and mirror entries
+   * 0 and 1 of this array — new code should always read fathomTexts.
+   */
+  fathomTexts: jsonb("fathom_texts").$type<string[]>(),
   checkinText: text("checkin_text"),
   numSprints: integer("num_sprints").notNull().default(1),
   anchors: jsonb("anchors"),

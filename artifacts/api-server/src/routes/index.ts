@@ -18,6 +18,7 @@ import globalSearchRouter from "./globalSearch";
 import sprintSessionsRouter from "./sprintSessions";
 import outcomesReportRouter from "./outcomesReport";
 import builderRouter from "./builderRoutes";
+import wadhwaniRouter from "./wadhwaniRoutes";
 
 const router: IRouter = Router();
 
@@ -40,5 +41,6 @@ router.use(globalSearchRouter);
 router.use(sprintSessionsRouter);
 router.use(outcomesReportRouter);
 router.use(builderRouter);
+router.use(wadhwaniRouter);
 
 export default router;
