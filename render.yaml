@@ -1,39 +1,73 @@
-# Render Blueprint — one-click deploy
-# https://render.com/docs/infrastructure-as-code
+# Render Blueprint — updated to include the cohort sync cron job.
 #
-# What this provisions:
-#   • 1 web service (Node.js)  — runs Express + serves the React SPA
-#   • A persistent disk is NOT needed (Postgres is on Neon)
+# This is the FULL replacement for your current render.yaml. The web
+# service block is identical to what you had; only the new cron block
+# and the INTERNAL_TOKEN env var are additions.
 #
-# Postgres is intentionally NOT in this file — bring your own DATABASE_URL
-# from Neon (free 0.5GB, no sleep). See DEPLOY_TO_RENDER.md.
+# Render Cron Jobs are FREE on the free tier (separate from the 750-hour
+# web service quota). So adding this costs nothing.
 
 services:
+  # ────────────────────────────────────────────────────────────────────
+  # Web service — Express + React SPA (unchanged from your current setup)
+  # ────────────────────────────────────────────────────────────────────
   - type: web
     name: thinking-spree
     runtime: node
-    plan: free          # 750 hours/month; sleeps after 15 min idle
-    region: singapore   # closest free region to India; change if needed
-    # corepack picks pnpm@10.33.4 from package.json#packageManager
+    plan: free
+    region: singapore
     buildCommand: "corepack enable && corepack prepare pnpm@10.33.4 --activate && pnpm run render:build"
     startCommand: "pnpm run render:start"
     healthCheckPath: /api/healthz
-    autoDeploy: true    # redeploy on every push to the connected branch
+    autoDeploy: true
     envVars:
       - key: NODE_ENV
         value: production
       - key: NODE_VERSION
         value: "22"
-      # Silences corepack's interactive download prompt in CI environments.
       - key: COREPACK_ENABLE_DOWNLOAD_PROMPT
         value: "0"
-      # SESSION_SECRET — random 32-byte hex string. Render generates this once
-      # and never shows it again. DO NOT use the dev fallback in production.
       - key: SESSION_SECRET
         generateValue: true
-      # ─── Set these manually in the Render dashboard after first deploy: ───
-      # DATABASE_URL          — from Neon (Postgres connection string)
-      # GOOGLE_CLIENT_ID      — from Google Cloud Console
-      # GOOGLE_CLIENT_SECRET  — from Google Cloud Console
-      # GOOGLE_REDIRECT_URI   — https://<your-render-domain>/api/google/oauth/callback
-      # APP_BASE_URL          — https://<your-render-domain>
+      # NEW — shared secret the cron job uses to call /api/cron/*.
+      # Generate a random 32-byte hex string in the Render dashboard.
+      - key: INTERNAL_TOKEN
+        generateValue: true
+      # ─── Set manually after first deploy: ───
+      # DATABASE_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+      # GOOGLE_REDIRECT_URI, APP_BASE_URL
+
+  # ────────────────────────────────────────────────────────────────────
+  # NEW — Cron job that hits the cohort sync endpoint every 5 min.
+  # Free tier: cron jobs are billed separately and the free plan covers
+  # plenty of runs for this workload.
+  # ────────────────────────────────────────────────────────────────────
+  - type: cron
+    name: thinking-spree-sync-cohorts
+    runtime: node
+    plan: free
+    region: singapore
+    # Every 5 minutes. Tune up/down as needed.
+    # Common alternatives:
+    #   "*/15 * * * *"   every 15 min
+    #   "0 * * * *"      hourly
+    #   "0 9-21 * * 1-5" hourly during India business hours, weekdays
+    schedule: "*/5 * * * *"
+    buildCommand: "corepack enable && corepack prepare pnpm@10.33.4 --activate && pnpm install --frozen-lockfile=false"
+    # Single curl. Uses the same env vars resolved from this blueprint —
+    # `fromService` references the web service so the token stays in sync.
+    startCommand: |
+      curl -sS -X POST \
+        -H "Authorization: Bearer $INTERNAL_TOKEN" \
+        "$APP_BASE_URL/api/cron/sync-cohorts"
+    envVars:
+      - key: INTERNAL_TOKEN
+        fromService:
+          type: web
+          name: thinking-spree
+          envVarKey: INTERNAL_TOKEN
+      - key: APP_BASE_URL
+        fromService:
+          type: web
+          name: thinking-spree
+          envVarKey: APP_BASE_URL
