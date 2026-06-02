@@ -72,8 +72,20 @@ router.post(
   "/builder/growth-reports",
   upload.fields([
     { name: "strategic_canvas", maxCount: 1 },
+    // Dynamic Fathom slots — accept up to 10. Frontend sends as many as the
+    // consultant attaches (v5.5 removed the old 2-slot limit). We also keep
+    // the legacy names fathom_1/fathom_2 working in case any old client
+    // is still around. Filtered out at process time if missing.
     { name: "fathom_1", maxCount: 1 },
     { name: "fathom_2", maxCount: 1 },
+    { name: "fathom_3", maxCount: 1 },
+    { name: "fathom_4", maxCount: 1 },
+    { name: "fathom_5", maxCount: 1 },
+    { name: "fathom_6", maxCount: 1 },
+    { name: "fathom_7", maxCount: 1 },
+    { name: "fathom_8", maxCount: 1 },
+    { name: "fathom_9", maxCount: 1 },
+    { name: "fathom_10", maxCount: 1 },
     { name: "checkin", maxCount: 1 },
   ]),
   async (req, res) => {
@@ -97,12 +109,22 @@ router.post(
       // than in parallel — small files, parallelism adds risk of resource
       // contention on the free-tier dyno.
       const strategicCanvasText = await extractTextFromUpload(canvas.originalname, canvas.buffer);
-      const fathom1Text = files?.fathom_1?.[0]
-        ? await extractTextFromUpload(files.fathom_1[0].originalname, files.fathom_1[0].buffer)
-        : null;
-      const fathom2Text = files?.fathom_2?.[0]
-        ? await extractTextFromUpload(files.fathom_2[0].originalname, files.fathom_2[0].buffer)
-        : null;
+
+      // Collect all Fathom transcripts in order. We support up to 10 slots,
+      // numbered fathom_1..fathom_10. Missing slots are skipped — the array
+      // is dense (no holes). Two legacy columns mirror the first two entries
+      // so old code paths that still read fathom1Text/fathom2Text continue
+      // to work; new code should always read fathomTexts.
+      const fathomTexts: string[] = [];
+      for (let i = 1; i <= 10; i++) {
+        const f = files?.[`fathom_${i}`]?.[0];
+        if (!f) continue;
+        const text = await extractTextFromUpload(f.originalname, f.buffer);
+        if (text) fathomTexts.push(text);
+      }
+      const fathom1Text = fathomTexts[0] ?? null;
+      const fathom2Text = fathomTexts[1] ?? null;
+
       const checkinText = files?.checkin?.[0]
         ? await extractTextFromUpload(files.checkin[0].originalname, files.checkin[0].buffer)
         : null;
@@ -122,6 +144,7 @@ router.post(
         tsheetLink,
         status: "drafting",
         strategicCanvasText,
+        fathomTexts: fathomTexts.length > 0 ? fathomTexts : null,
         fathom1Text,
         fathom2Text,
         checkinText,
@@ -150,11 +173,15 @@ router.post("/builder/growth-reports/:id/extract-anchors", async (req, res) => {
       res.status(400).json({ error: "Strategic Canvas text missing — re-upload required" }); return;
     }
 
+    // Prefer the new JSONB array (v5.5+). Fall back to legacy columns for
+    // rows created before migration 010 ran.
+    const fathomTexts: string[] = (Array.isArray(row.fathomTexts) ? row.fathomTexts : null)
+      ?? [row.fathom1Text, row.fathom2Text].filter((s): s is string => !!s);
+
     const anchors = await extractAnchors({
       startupName: row.startupName,
       strategicCanvasText: row.strategicCanvasText,
-      fathom1Text: row.fathom1Text ?? undefined,
-      fathom2Text: row.fathom2Text ?? undefined,
+      fathomTexts,
       checkinText: row.checkinText ?? undefined,
     });
 
@@ -205,12 +232,14 @@ router.post("/builder/growth-reports/:id/generate-report", async (req, res) => {
     if (!row.anchors) { res.status(400).json({ error: "Anchors not yet extracted" }); return; }
     if (!row.strategicCanvasText) { res.status(400).json({ error: "Source text missing" }); return; }
 
+    const fathomTexts: string[] = (Array.isArray(row.fathomTexts) ? row.fathomTexts : null)
+      ?? [row.fathom1Text, row.fathom2Text].filter((s): s is string => !!s);
+
     const report = await generateJourneyReport({
       startupName: row.startupName,
       anchors: row.anchors as GrowthReportAnchors,
       strategicCanvasText: row.strategicCanvasText,
-      fathom1Text: row.fathom1Text ?? undefined,
-      fathom2Text: row.fathom2Text ?? undefined,
+      fathomTexts,
       checkinText: row.checkinText ?? undefined,
     });
 

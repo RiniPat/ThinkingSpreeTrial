@@ -154,14 +154,16 @@ export type JourneyReport = {
 export async function extractAnchors(input: {
   startupName: string;
   strategicCanvasText: string;
-  fathom1Text?: string;
-  fathom2Text?: string;
+  /** Zero-or-more Fathom transcripts. Order matters — index = transcript N. */
+  fathomTexts?: string[];
   checkinText?: string;
 }): Promise<GrowthReportAnchors> {
+  const fathomBlocks = (input.fathomTexts ?? [])
+    .map((t, i) => t ? `\n\n=== FATHOM TRANSCRIPT ${i + 1} (extracted text) ===\n${t}` : "")
+    .join("");
   const docs = [
     `=== STRATEGIC CANVAS (extracted text) ===\n${input.strategicCanvasText}`,
-    input.fathom1Text ? `\n\n=== FATHOM TRANSCRIPT 1 (extracted text) ===\n${input.fathom1Text}` : "",
-    input.fathom2Text ? `\n\n=== FATHOM TRANSCRIPT 2 (extracted text) ===\n${input.fathom2Text}` : "",
+    fathomBlocks,
     input.checkinText ? `\n\n=== CHECK-IN CALL (extracted text) ===\n${input.checkinText}` : "",
   ].join("");
 
@@ -224,14 +226,16 @@ export async function generateJourneyReport(input: {
   startupName: string;
   anchors: GrowthReportAnchors;
   strategicCanvasText: string;
-  fathom1Text?: string;
-  fathom2Text?: string;
+  /** Zero-or-more Fathom transcripts. Order matters — index = transcript N. */
+  fathomTexts?: string[];
   checkinText?: string;
 }): Promise<JourneyReport> {
+  const fathomBlocks = (input.fathomTexts ?? [])
+    .map((t, i) => t ? `\n\n=== FATHOM ${i + 1} ===\n${t}` : "")
+    .join("");
   const supportingDocs = [
     `=== STRATEGIC CANVAS ===\n${input.strategicCanvasText}`,
-    input.fathom1Text ? `\n\n=== FATHOM 1 ===\n${input.fathom1Text}` : "",
-    input.fathom2Text ? `\n\n=== FATHOM 2 ===\n${input.fathom2Text}` : "",
+    fathomBlocks,
     input.checkinText ? `\n\n=== CHECK-IN ===\n${input.checkinText}` : "",
   ].join("");
 
