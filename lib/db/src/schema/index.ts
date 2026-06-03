@@ -12,3 +12,4 @@ export * from "./proposals";
 export * from "./sprintSessions";
 export * from "./growthReports";
 export * from "./summaryBuilds";
+export * from "./calendarSprintMarks";

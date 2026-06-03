@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, type ReactNode } from "react";
 import { useListIncubators, useUpdateSprint, getListSprintsQueryKey, customFetch } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -9,7 +9,7 @@ import {
   Activity, CheckCircle, Clock, XCircle, Zap, ChevronRight, Search,
   User, Calendar as CalendarIcon, TrendingUp, Filter, X, ArrowUpDown,
   LayoutGrid, Table as TableIcon, ChevronUp, ChevronDown, RotateCcw, Loader2,
-  Users, Download, RefreshCw,
+  Users, Download, RefreshCw, Trash2, Plus,
 } from "lucide-react";
 import { format, parseISO, isThisWeek, isThisMonth } from "date-fns";
 
@@ -28,6 +28,8 @@ type Sprint = {
   sessionType?: string | null;
   paymentStatus?: string | null;
   billedTo?: string | null;
+  price?: string | number | null;
+  billNumber?: string | null;
   cyYear?: number | null; month?: number | null; week?: number | null; quarter?: string | null;
   strengths?: string | null; gaps?: string | null; nextGoal?: string | null;
 };
@@ -45,7 +47,20 @@ const STATUS_CONFIG = {
 // updating these inline after each sprint, so it's important that the picker
 // shows the same options across the team.
 const SESSION_TYPE_CHOICES = ["Need Assessment", "Strategy", "Fundraising", "Market Access", "Mentorship", "Review", "Other"];
-const PAYMENT_CHOICES = ["Paid", "Unpaid", "Invoiced", "Pending", "Waived"];
+// Payment Status — matched to the Live Sprint Tracking sheet's dropdown.
+const PAYMENT_CHOICES = ["Received", "NA", "Pending", "Bill Raised"];
+// Stage of business — from the sheet. Editable: any typed/legacy value is kept.
+const STAGE_CHOICES = ["Idea", "MVP", "Prototype", "Early Traction", "Early Growth", "Growth", "Business Expansion", "Market Expansion", "1:many"];
+// "Billed to" — from the sheet.
+const BILLED_TO_CHOICES = ["National Entreprenurship Network", "Ashoka", "ISB", "JU", "TISS", "Elecroom", "WInspire"];
+
+/** Program "family" = the first word of the program name, so "Wadhwani 11.1",
+ *  "Wadhwani 4.2", etc. all collapse to a single "Wadhwani" option. */
+function programFamily(name?: string | null): string | null {
+  if (!name) return null;
+  const t = name.trim();
+  return t ? t.split(/\s+/)[0] : null;
+}
 
 function exportCsv(rows: Sprint[]) {
   const cols: Array<[string, (s: Sprint) => string]> = [
@@ -176,6 +191,7 @@ export default function SprintTrackingPage() {
   // EVERY sprint (scope=all) — matching the master "Sheet Tracking" workbook.
   // Consultants can flip to "Mine only" if they want their own view.
   const [scope, setScope] = useState<"all" | "mine">("all");
+  const [addOpen, setAddOpen] = useState(false);
   const sprintsQuery = useQuery<Sprint[]>({
     queryKey: ["/api/sprints", scope],
     queryFn: () => customFetch<Sprint[]>(`${BASE}/api/sprints?scope=${scope}`, { credentials: "include" }),
@@ -247,7 +263,7 @@ export default function SprintTrackingPage() {
     return {
       industries:   dedup(sprints.map(s => s.industry)),
       stages:       dedup(sprints.map(s => s.stage)),
-      programs:     dedup(sprints.map(s => s.programName)),
+      programs:     dedup(sprints.map(s => programFamily(s.programName))),
       partners:     dedup(sprints.map(s => s.partnerName)),
       hosts:        dedup(sprints.map(s => s.sprintHost ?? s.consultantName)),
       coHosts:      dedup(sprints.map(s => s.coHost)),
@@ -266,7 +282,7 @@ export default function SprintTrackingPage() {
       if (status !== "all" && s.status !== status) return false;
       if (industry !== "all" && s.industry !== industry) return false;
       if (stage !== "all" && s.stage !== stage) return false;
-      if (program !== "all" && s.programName !== program) return false;
+      if (program !== "all" && programFamily(s.programName) !== program) return false;
       if (partner !== "all" && s.partnerName !== partner) return false;
       if (host !== "all" && (s.sprintHost ?? s.consultantName) !== host) return false;
       if (coHost !== "all" && s.coHost !== coHost) return false;
@@ -351,6 +367,12 @@ export default function SprintTrackingPage() {
               title="Export filtered view as CSV"
               className="flex items-center gap-1.5 px-3 py-1.5 bg-card border border-card-border rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground transition">
               <Download size={13} />Export CSV
+            </button>
+            <button
+              onClick={() => setAddOpen(true)}
+              title="Add a startup"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-medium hover:opacity-90 transition">
+              <Plus size={13} />Add Startup
             </button>
             <div className="flex items-center gap-1 bg-card border border-card-border rounded-lg p-0.5">
               <button onClick={() => setView("table")} title="Table view"
@@ -512,6 +534,15 @@ export default function SprintTrackingPage() {
           </>
         )}
       </div>
+      <AddStartupDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        cohorts={(incubators ?? []).map((i: any) => i.name)}
+        onAdded={() => {
+          queryClient.invalidateQueries({ queryKey: ["/api/companies"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/sprints", scope] });
+        }}
+      />
     </Layout>
   );
 }
@@ -548,6 +579,102 @@ function SortHeader({ label, k, sortKey, sortDir, toggleSort }: {
   );
 }
 
+const FIELD_INPUT_CLS = "w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30";
+
+function Labeled({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+/** Admin "add a startup" dialog — spreadsheet-style quick add. */
+function AddStartupDialog({ open, onClose, cohorts, onAdded }: {
+  open: boolean; onClose: () => void; cohorts: string[]; onAdded: () => void;
+}) {
+  const { toast } = useToast();
+  const empty = { companyName: "", founderName: "", founderEmail: "", stage: "", industry: "", cohortName: "" };
+  const [form, setForm] = useState(empty);
+  const [saving, setSaving] = useState(false);
+  if (!open) return null;
+
+  const submit = async () => {
+    if (!form.companyName.trim()) { toast({ title: "Company name is required", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      const res = await fetch(`${BASE}/api/companies`, {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(form),
+      });
+      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || "Failed to add");
+      toast({ title: "Startup added", description: form.companyName });
+      setForm(empty); onAdded(); onClose();
+    } catch (e: any) {
+      toast({ title: "Couldn't add startup", description: e.message, variant: "destructive" });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-card border border-card-border rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+          <h3 className="font-serif text-lg text-foreground">Add Startup</h3>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X size={18} /></button>
+        </div>
+        <div className="p-6 space-y-3">
+          <Labeled label="Company Name *"><input value={form.companyName} onChange={e => setForm({ ...form, companyName: e.target.value })} className={FIELD_INPUT_CLS} placeholder="e.g. Bull AgriTech" /></Labeled>
+          <div className="grid grid-cols-2 gap-3">
+            <Labeled label="Founder"><input value={form.founderName} onChange={e => setForm({ ...form, founderName: e.target.value })} className={FIELD_INPUT_CLS} /></Labeled>
+            <Labeled label="Email"><input value={form.founderEmail} onChange={e => setForm({ ...form, founderEmail: e.target.value })} className={FIELD_INPUT_CLS} /></Labeled>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Labeled label="Stage of business">
+              <select value={form.stage} onChange={e => setForm({ ...form, stage: e.target.value })} className={FIELD_INPUT_CLS}>
+                <option value="">—</option>
+                {STAGE_CHOICES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </Labeled>
+            <Labeled label="Industry"><input value={form.industry} onChange={e => setForm({ ...form, industry: e.target.value })} className={FIELD_INPUT_CLS} /></Labeled>
+          </div>
+          <Labeled label="Cohort / Program">
+            <input list="cohort-datalist" value={form.cohortName} onChange={e => setForm({ ...form, cohortName: e.target.value })} className={FIELD_INPUT_CLS} placeholder="Type or pick an existing cohort" />
+            <datalist id="cohort-datalist">{cohorts.map(c => <option key={c} value={c} />)}</datalist>
+          </Labeled>
+        </div>
+        <div className="px-6 py-4 border-t border-border flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-2 text-sm rounded-md border border-border hover:bg-muted">Cancel</button>
+          <button onClick={submit} disabled={saving} className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50">
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Add Startup
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Inline price editor — commits on blur so we don't PATCH on every keystroke. */
+function PriceInput({ value, onCommit, disabled }: {
+  value?: string | number | null; onCommit: (v: string | null) => void; disabled?: boolean;
+}) {
+  const initial = value == null ? "" : String(value);
+  const [local, setLocal] = useState(initial);
+  useEffect(() => { setLocal(value == null ? "" : String(value)); }, [value]);
+  return (
+    <input
+      type="number" inputMode="decimal" value={local} disabled={disabled}
+      onChange={e => setLocal(e.target.value)}
+      onBlur={() => {
+        const v = local.trim() === "" ? null : local.trim();
+        if (v !== (value == null ? null : String(value))) onCommit(v);
+      }}
+      placeholder="—"
+      className="w-20 text-right px-1.5 py-0.5 text-[11px] bg-transparent border border-transparent hover:border-input focus:border-input rounded focus:outline-none focus:ring-1 focus:ring-ring tabular-nums"
+    />
+  );
+}
+
 function SprintTable({
   sorted, sortKey, sortDir, toggleSort, onRowClick, scopeKey,
 }: {
@@ -577,6 +704,40 @@ function SprintTable({
     }
   }
 
+  // Stage of business lives on the company (founder), not the sprint — patch it
+  // there and refresh both lists.
+  async function patchCompanyStage(founderId: number, stage: string) {
+    setUpdatingId(founderId);
+    try {
+      const res = await fetch(`${BASE}/api/companies/${founderId}`, {
+        method: "PATCH", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage }),
+      });
+      if (!res.ok) throw new Error("Failed to update stage");
+      await queryClient.invalidateQueries({ queryKey: ["/api/sprints", scopeKey] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/companies"] });
+      toast({ title: "Stage updated" });
+    } catch (err: any) {
+      toast({ title: "Update failed", description: err?.message, variant: "destructive" });
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  async function removeStartup(founderId: number, name: string) {
+    if (!window.confirm(`Remove "${name}" and all its sprint sessions? This can't be undone.`)) return;
+    try {
+      const res = await fetch(`${BASE}/api/companies/${founderId}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) throw new Error("Delete failed");
+      await queryClient.invalidateQueries({ queryKey: ["/api/sprints", scopeKey] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/companies"] });
+      toast({ title: "Startup removed" });
+    } catch (err: any) {
+      toast({ title: "Remove failed", description: err?.message, variant: "destructive" });
+    }
+  }
+
   return (
     <div className="bg-card border border-card-border rounded-xl overflow-hidden">
       <div className="overflow-x-auto">
@@ -594,8 +755,10 @@ function SprintTable({
               <th className="px-3 py-2.5 text-center font-medium"><SortHeader label="#" k="sprintNumber" sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} /></th>
               <th className="px-3 py-2.5 text-left font-medium">Session Type</th>
               <th className="px-3 py-2.5 text-left font-medium">Payment</th>
+              <th className="px-3 py-2.5 text-left font-medium">Billed To</th>
+              <th className="px-3 py-2.5 text-right font-medium">Price</th>
               <th className="px-3 py-2.5 text-left font-medium"><SortHeader label="Status" k="status" sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} /></th>
-              <th className="px-3 py-2.5 w-8"></th>
+              <th className="px-3 py-2.5 w-16 text-center font-medium">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -611,9 +774,20 @@ function SprintTable({
                   </td>
                   <td className="px-3 py-2.5 text-foreground font-medium max-w-[160px] truncate cursor-pointer" title={s.companyName} onClick={() => onRowClick(s.id)}>{s.companyName}</td>
                   <td className="px-3 py-2.5 text-muted-foreground max-w-[120px] truncate cursor-pointer" title={s.founderName} onClick={() => onRowClick(s.id)}>{s.founderName}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground max-w-[110px] truncate">{s.industry ?? "—"}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground max-w-[110px] truncate">{s.stage ?? "—"}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground max-w-[120px] truncate" title={s.programName ?? undefined}>{s.programName ?? "—"}</td>
+                  <td className="px-3 py-2.5 max-w-[110px] truncate">{s.industry ?? "—"}</td>
+                  <td className="px-3 py-2.5" onClick={e => e.stopPropagation()}>
+                    <select
+                      value={s.stage ?? ""}
+                      onChange={e => patchCompanyStage(s.founderId, e.target.value)}
+                      disabled={isUpdating}
+                      className="appearance-none cursor-pointer pl-2 pr-5 py-0.5 text-[10px] bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 border border-transparent rounded focus:outline-none focus:ring-1 focus:ring-ring max-w-[120px]"
+                    >
+                      <option value="">— Stage —</option>
+                      {s.stage && !STAGE_CHOICES.includes(s.stage) && <option value={s.stage}>{s.stage}</option>}
+                      {STAGE_CHOICES.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-3 py-2.5 text-muted-foreground max-w-[120px] truncate" title={s.programName ?? undefined}>{programFamily(s.programName) ?? "—"}</td>
                   <td className="px-3 py-2.5 text-foreground">{s.sprintHost ?? s.consultantName}</td>
                   <td className="px-3 py-2.5 text-muted-foreground">{s.coHost ?? "—"}</td>
                   <td className="px-3 py-2.5 text-center tabular-nums text-muted-foreground">{s.sprintNumber ?? "—"}</td>
@@ -652,6 +826,29 @@ function SprintTable({
                     </select>
                   </td>
 
+                  {/* Inline-editable Billed To dropdown */}
+                  <td className="px-3 py-2.5" onClick={e => e.stopPropagation()}>
+                    <select
+                      value={s.billedTo ?? ""}
+                      onChange={e => patchField(s.id, { billedTo: e.target.value || null } as any)}
+                      disabled={isUpdating}
+                      className="appearance-none cursor-pointer pl-2 pr-5 py-0.5 text-[10px] bg-muted text-muted-foreground border border-transparent rounded focus:outline-none focus:ring-1 focus:ring-ring max-w-[120px]"
+                    >
+                      <option value="">—</option>
+                      {s.billedTo && !BILLED_TO_CHOICES.includes(s.billedTo) && <option value={s.billedTo}>{s.billedTo}</option>}
+                      {BILLED_TO_CHOICES.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </td>
+
+                  {/* Inline-editable Price (manual) */}
+                  <td className="px-3 py-2.5 text-right" onClick={e => e.stopPropagation()}>
+                    <PriceInput
+                      value={s.price}
+                      disabled={isUpdating}
+                      onCommit={(v) => patchField(s.id, { price: v } as any)}
+                    />
+                  </td>
+
                   {/* Inline-editable Status chip (existing behavior) */}
                   <td className="px-3 py-2.5" onClick={e => e.stopPropagation()}>
                     {isUpdating ? (
@@ -673,7 +870,22 @@ function SprintTable({
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2.5 text-muted-foreground cursor-pointer" onClick={() => onRowClick(s.id)}><ChevronRight size={14} /></td>
+                  <td className="px-3 py-2.5" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-center gap-1.5">
+                      {s.status !== "completed" && (
+                        <button
+                          onClick={() => patchField(s.id, { status: "completed" } as any)}
+                          disabled={isUpdating}
+                          title="Mark this sprint done"
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-300 disabled:opacity-50"
+                        >
+                          <CheckCircle size={11} /> Done
+                        </button>
+                      )}
+                      <button onClick={() => onRowClick(s.id)} title="Open" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><ChevronRight size={14} /></button>
+                      <button onClick={() => removeStartup(s.founderId, s.companyName)} title="Remove startup" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-destructive"><Trash2 size={13} /></button>
+                    </div>
+                  </td>
                 </tr>
               );
             })}

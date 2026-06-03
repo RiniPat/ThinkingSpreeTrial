@@ -384,6 +384,54 @@ router.post("/companies/:id/resync", async (req, res) => {
  * does. This lets the consultant rename or move a company between cohorts
  * without round-tripping through the upload flow.
  */
+/**
+ * Manually create a startup/company (admin add, spreadsheet-style).
+ * Body: { companyName (required), founderName?, founderEmail?, stage?,
+ *         industry?, cohortName? }
+ */
+router.post("/companies", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  const companyName = String(req.body?.companyName ?? "").trim();
+  if (!companyName) { res.status(400).json({ error: "companyName is required" }); return; }
+  try {
+    // Optional cohort by name → find-or-create.
+    let incubatorId: number | null = null;
+    const cohortName = req.body?.cohortName ? String(req.body.cohortName).trim() : "";
+    if (cohortName) {
+      const [existing] = await db.select().from(incubatorsTable)
+        .where(sql`LOWER(${incubatorsTable.name}) = LOWER(${cohortName})`).limit(1);
+      if (existing) incubatorId = existing.id;
+      else {
+        const [created] = await db.insert(incubatorsTable)
+          .values({ name: cohortName, type: "isb", description: "Created from Live Sprint Tracking" })
+          .returning();
+        incubatorId = created.id;
+      }
+    }
+    const email = String(req.body?.founderEmail ?? "").trim() || `unknown+${Date.now()}@placeholder.local`;
+    const [created] = await db.insert(foundersTable).values({
+      companyName,
+      name: String(req.body?.founderName ?? "").trim() || "Unknown",
+      email,
+      stage: req.body?.stage ? String(req.body.stage).trim() : null,
+      industry: req.body?.industry ? String(req.body.industry).trim() : null,
+      incubatorId,
+      ownerId: userId,
+      source: "manual_curation",
+      stageWorkflow: "pre_sprint",
+    }).returning();
+    await db.insert(companyEventsTable).values({
+      founderId: created.id, userId, kind: "template_uploaded",
+      note: `Startup added manually${cohortName ? ` to ${cohortName}` : ""}`,
+      metadata: { via: "live_sprint_tracking_add" },
+    });
+    res.json({ company: { id: created.id, companyName: created.companyName } });
+  } catch (err) {
+    req.log.error({ err }, "Manual create company failed");
+    res.status(500).json({ error: "Failed to create company" });
+  }
+});
+
 router.patch("/companies/:id", async (req, res) => {
   const userId = await requireUser(req, res); if (!userId) return;
   const id = Number(req.params.id);
@@ -421,6 +469,10 @@ router.patch("/companies/:id", async (req, res) => {
     if (req.body?.deckUrl != null)      patch.deckUrl      = String(req.body.deckUrl).trim() || null;
     if (req.body?.sprintHost != null)   patch.sprintHost   = String(req.body.sprintHost).trim() || null;
     if (req.body?.coHost != null)       patch.coHost       = String(req.body.coHost).trim() || null;
+    // Stage of business + Industry — editable inline from the Live Sprint
+    // Tracking view and set when a sprint is marked done.
+    if (req.body?.stage != null)        patch.stage        = String(req.body.stage).trim() || null;
+    if (req.body?.industry != null)     patch.industry     = String(req.body.industry).trim() || null;
     if (nextCohortId !== undefined)     patch.incubatorId  = nextCohortId;
 
     // When a consultant explicitly assigns this company to a cohort, make sure

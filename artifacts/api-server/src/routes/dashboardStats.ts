@@ -17,7 +17,7 @@
  *   - upcoming_this_week — sprint events scheduled for the next 7 days
  */
 import { Router } from "express";
-import { db, foundersTable, companyEventsTable, emailDraftsTable } from "@workspace/db";
+import { db, foundersTable, companyEventsTable, emailDraftsTable, calendarSprintMarksTable } from "@workspace/db";
 import { and, eq, gte, inArray, lt, ne } from "drizzle-orm";
 import { google } from "googleapis";
 import { getAuthedClient } from "../lib/google";
@@ -35,11 +35,12 @@ type CalEvent = {
 };
 
 /**
- * Pulls every "T-Sprint for ..." event in this calendar month from the
- * consultant's primary calendar. Returns an empty list if Calendar isn't
+ * Pulls EVERY event in this calendar month from the consultant's primary
+ * calendar (not just title matches) so the caller can classify them as sprints
+ * via the title rule and/or manual marks. Returns [] if Calendar isn't
  * connected, so the dashboard degrades gracefully.
  */
-async function fetchSprintEventsThisMonth(userId: number, now = new Date()): Promise<CalEvent[]> {
+async function fetchMonthEvents(userId: number, now = new Date()): Promise<CalEvent[]> {
   try {
     const client = await getAuthedClient(userId);
     if (!client) return [];
@@ -59,21 +60,18 @@ async function fetchSprintEventsThisMonth(userId: number, now = new Date()): Pro
     });
 
     const items = r.data.items ?? [];
-    const sprints: CalEvent[] = items
-      .filter(e => SPRINT_TITLE_RX.test(e.summary ?? ""))
-      .map(e => {
-        const startISO = e.start?.dateTime ?? e.start?.date ?? "";
-        const endISO   = e.end?.dateTime   ?? e.end?.date   ?? "";
-        const startMs = startISO ? new Date(startISO).getTime() : 0;
-        return {
-          id: e.id ?? "",
-          title: e.summary ?? "",
-          startISO,
-          endISO,
-          isPast: startMs > 0 && startMs < now.getTime(),
-        };
-      });
-    return sprints;
+    return items.map(e => {
+      const startISO = e.start?.dateTime ?? e.start?.date ?? "";
+      const endISO   = e.end?.dateTime   ?? e.end?.date   ?? "";
+      const startMs = startISO ? new Date(startISO).getTime() : 0;
+      return {
+        id: e.id ?? "",
+        title: e.summary ?? "",
+        startISO,
+        endISO,
+        isPast: startMs > 0 && startMs < now.getTime(),
+      };
+    });
   } catch {
     // Calendar unauthed or token expired — fall back silently.
     return [];
@@ -91,8 +89,26 @@ router.get("/stats/dashboard", async (req, res) => {
     const startOfWeek = new Date(now); startOfWeek.setDate(now.getDate() - now.getDay()); startOfWeek.setHours(0,0,0,0);
     const endOfWeek   = new Date(startOfWeek); endOfWeek.setDate(startOfWeek.getDate() + 7);
 
-    // 1) Calendar-derived sprint counts (this month)
-    const sprintEvents = await fetchSprintEventsThisMonth(userId, now);
+    // 1) Calendar-derived sprint counts (this month) — auto (title rule) plus
+    //    manual marks the consultant has set.
+    const allEvents = await fetchMonthEvents(userId, now);
+    const markRows = await db
+      .select()
+      .from(calendarSprintMarksTable)
+      .where(eq(calendarSprintMarksTable.userId, userId));
+    const markByEvent = new Map(markRows.map(m => [m.googleEventId, m.marked]));
+
+    // An event is a sprint if a manual mark says so; otherwise fall back to the
+    // title rule. A manual mark of `false` overrides an auto title match.
+    const isSprint = (e: CalEvent): boolean => {
+      const mark = markByEvent.get(e.id);
+      if (mark !== undefined) return mark;
+      return SPRINT_TITLE_RX.test(e.title);
+    };
+    const isManual = (e: CalEvent): boolean => markByEvent.get(e.id) === true && !SPRINT_TITLE_RX.test(e.title);
+
+    const sprintEvents = allEvents.filter(isSprint);
+    const otherEvents  = allEvents.filter(e => !isSprint(e));
     const myTSprints = sprintEvents.length;
     const scheduled  = sprintEvents.filter(e => !e.isPast).length;
 
@@ -152,6 +168,12 @@ router.get("/stats/dashboard", async (req, res) => {
       upcomingThisWeek,
       // Echo what we found so the dashboard can also show a small list
       sprintEvents: sprintEvents.map(e => ({
+        id: e.id, title: e.title, startISO: e.startISO, endISO: e.endISO, isPast: e.isPast,
+        manual: isManual(e),
+      })),
+      // Non-sprint events this month, so the dashboard can offer "Mark as
+      // T-Sprint" for sessions that aren't named "T-Sprint for ...".
+      otherEvents: otherEvents.map(e => ({
         id: e.id, title: e.title, startISO: e.startISO, endISO: e.endISO, isPast: e.isPast,
       })),
     });

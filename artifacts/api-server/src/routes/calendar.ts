@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { db, sprintsTable, foundersTable, usersTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, sprintsTable, foundersTable, usersTable, calendarSprintMarksTable } from "@workspace/db";
+import { eq, and } from "drizzle-orm";
 import { google } from "googleapis";
 import { getAuthedClient } from "../lib/google";
 
@@ -112,6 +112,46 @@ router.get("/calendar/events", async (req, res) => {
   } catch (err) {
     req.log.error({ err }, "Error fetching calendar events");
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * Manually mark (or un-mark) a Google Calendar event as a T-Sprint, for events
+ * whose title doesn't follow the "T-Sprint for ..." convention. Upserts on
+ * (user, event). `marked: false` overrides an auto title match.
+ *
+ * Body: { googleEventId, title?, startISO?, endISO?, marked? (default true), founderId? }
+ */
+router.post("/calendar/sprint-marks", async (req, res) => {
+  const userId = req.session?.userId;
+  if (!userId) { res.status(401).json({ error: "Not authenticated" }); return; }
+  const googleEventId = String(req.body?.googleEventId ?? "").trim();
+  if (!googleEventId) { res.status(400).json({ error: "googleEventId required" }); return; }
+  const marked = req.body?.marked === undefined ? true : Boolean(req.body.marked);
+  const founderId = Number.isFinite(Number(req.body?.founderId)) ? Number(req.body.founderId) : null;
+
+  try {
+    await db.insert(calendarSprintMarksTable).values({
+      userId, googleEventId,
+      title: req.body?.title ?? null,
+      startIso: req.body?.startISO ?? null,
+      endIso: req.body?.endISO ?? null,
+      marked, founderId,
+    }).onConflictDoUpdate({
+      target: [calendarSprintMarksTable.userId, calendarSprintMarksTable.googleEventId],
+      set: {
+        marked,
+        title: req.body?.title ?? null,
+        startIso: req.body?.startISO ?? null,
+        endIso: req.body?.endISO ?? null,
+        founderId,
+        updatedAt: new Date(),
+      },
+    });
+    res.json({ ok: true, googleEventId, marked });
+  } catch (err) {
+    req.log.error({ err }, "Failed to set calendar sprint mark");
+    res.status(500).json({ error: "Failed to set mark" });
   }
 });
 
