@@ -58,27 +58,28 @@ export async function extractSummaryFields(opts: {
 }): Promise<SummaryAiFields> {
   const { startupName, transcript, context } = opts;
 
-  const prompt = `You are a Thinking Spree consultant filling in a venture Summary Sheet for the Wadhwani Foundation program, based on a sprint session transcript.
+  const prompt = `You are a Thinking Spree consultant filling in a venture Summary Sheet for the Wadhwani Foundation program, based on one or more sprint session (Fathom) transcripts.
 
 Startup: ${startupName}
 ${context?.founder ? `Founder: ${context.founder}` : ""}
 ${context?.goal ? `Stated goal: ${context.goal}` : ""}
 
-From the transcript below, extract these fields. Use ONLY information present in the transcript — never invent specifics. If a field isn't addressed, return an empty string "" for it (do not guess).
+Answer each question using ONLY information present in the transcript(s). Do not invent specifics. If a question isn't addressed, return an empty string "" for it.
 
-Return STRICT JSON with exactly these keys and nothing else:
-{
-  "currentRevenueArr": "current revenue or ARR in the founder's own words, e.g. '₹40L ARR' or 'Pre-revenue'",
-  "industryDetail": "1-2 sentences on what the venture actually does (the detail behind its industry)",
-  "criticalVenture": "is this a high-priority / critical venture, and a short why; '' if not discussed",
-  "tsConnects": "specific market-access introductions or connects Thinking Spree made or should make",
-  "tsSupport": "support Thinking Spree is providing BEYOND connects (advisory, mentorship, interventions)"
-}
+Questions:
+1. currentRevenueArr — "What is the Current Revenue (ARR) for the company?" Give the figure in the founder's own words (e.g. "₹40L ARR", "Pre-revenue").
+2. industryDetail — "What is the Industry Detail, in one short phrase?" e.g. "Electrical Equipment Manufacturing".
+3. criticalVenture — "What is the Critical Venture for the company, in one short phrase?" e.g. "Scaling of Automated Panels".
+4. tsConnects — "What are the Thinking Spree Connects for the company?" e.g. "Plant and Factory consultants".
+5. tsSupport — "What is the Thinking Spree Support apart from connects?" e.g. "Value-stream mapping, ongoing advisory".
 
-Each value must be plain text, under ~60 words, no markdown.
+Return STRICT JSON with exactly these keys and string values, nothing else:
+{"currentRevenueArr":"","industryDetail":"","criticalVenture":"","tsConnects":"","tsSupport":""}
 
-TRANSCRIPT:
-${transcript.slice(0, 24000)}`;
+industryDetail and criticalVenture must each be a single short phrase (no sentences). All values plain text, no markdown.
+
+TRANSCRIPT(S):
+${transcript.slice(0, 28000)}`;
 
   const m = getModel(0.2);
   const result = await m.generateContent(prompt);

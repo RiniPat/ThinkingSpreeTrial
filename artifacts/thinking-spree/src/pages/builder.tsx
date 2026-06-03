@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import { Layout } from "@/components/Layout";
@@ -32,6 +32,24 @@ async function readErr(res: Response, fallback: string): Promise<string> {
     if (trimmed && !trimmed.startsWith("<")) return trimmed.slice(0, 300);
   }
   return `${fallback} (HTTP ${res.status}${res.statusText ? " " + res.statusText : ""})`;
+}
+
+/**
+ * useState that mirrors to localStorage, so Builder state (which mode, which
+ * report/build is open, and the in-progress New form text) survives switching
+ * browser tabs, navigating away, or a full reload. Note: uploaded File objects
+ * can't be serialized, so files must be re-attached after a hard reload — but
+ * once a draft is created server-side, reopening it restores everything else.
+ */
+function usePersistentState<T>(key: string, initial: T): [T, Dispatch<SetStateAction<T>>] {
+  const [value, setValue] = useState<T>(() => {
+    try { const s = localStorage.getItem(key); if (s != null) return JSON.parse(s) as T; } catch { /* ignore */ }
+    return initial;
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+  }, [key, value]);
+  return [value, setValue];
 }
 
 // ───────────────────────── Types (mirror backend) ────────────────────────
@@ -69,11 +87,12 @@ type FullReport = {
 type Mode = "growth_report" | "summary";
 
 export default function BuilderPage() {
-  // Mode toggle: Growth Report (Phase A, built) vs Summary (Phase B, placeholder).
-  const [mode, setMode] = useState<Mode>("growth_report");
+  // Mode toggle: Growth Report vs Summary. Persisted so the tab you were on is
+  // restored when you come back.
+  const [mode, setMode] = usePersistentState<Mode>("builder:mode", "growth_report");
   // Active report ID drives whether we show the library or the workflow.
-  const [activeId, setActiveId] = useState<number | null>(null);
-  const [creatingNew, setCreatingNew] = useState(false);
+  const [activeId, setActiveId] = usePersistentState<number | null>("builder:growth:activeId", null);
+  const [creatingNew, setCreatingNew] = usePersistentState<boolean>("builder:growth:creatingNew", false);
 
   return (
     <Layout>
@@ -204,7 +223,9 @@ function StatusBadge({ status }: { status: ListItem["status"] }) {
 // ───────────────────────── New report form (Step 1) ──────────────────────
 function NewReportForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: (id: number) => void }) {
   const { toast } = useToast();
-  const [form, setForm] = useState({
+  // Text fields persist across tab switches / reloads. Files can't be persisted
+  // (browser security), so they must be re-attached after a hard reload.
+  const [form, setForm] = usePersistentState("builder:growth:newForm", {
     startupName: "", cohort: "", tsheetLink: "", numSprints: 1 as 1 | 2,
   });
   const [canvas, setCanvas] = useState<File | null>(null);
@@ -231,6 +252,7 @@ function NewReportForm({ onCancel, onCreated }: { onCancel: () => void; onCreate
       return (await res.json()).report as FullReport;
     },
     onSuccess: (r) => {
+      try { localStorage.removeItem("builder:growth:newForm"); } catch { /* ignore */ }
       toast({ title: "Files uploaded", description: "Text extracted. Now extract anchors." });
       onCreated(r.id);
     },
@@ -757,8 +779,8 @@ type FullSummaryBuild = {
 };
 
 function SummaryBuilder() {
-  const [activeId, setActiveId] = useState<number | null>(null);
-  const [creatingNew, setCreatingNew] = useState(false);
+  const [activeId, setActiveId] = usePersistentState<number | null>("builder:summary:activeId", null);
+  const [creatingNew, setCreatingNew] = usePersistentState<boolean>("builder:summary:creatingNew", false);
 
   if (activeId !== null) return <SummaryWorkflow id={activeId} onBack={() => setActiveId(null)} />;
   if (creatingNew) return <NewSummaryForm onCancel={() => setCreatingNew(false)} onCreated={(id) => { setCreatingNew(false); setActiveId(id); }} />;
@@ -846,28 +868,25 @@ function SummaryLibrary({ onOpen, onNew }: { onOpen: (id: number) => void; onNew
 
 function NewSummaryForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: (id: number) => void }) {
   const { toast } = useToast();
-  const LS_KEY = "summaryBuilder:newForm";
-  // Rehydrate from localStorage so progress survives a tab switch / refresh.
-  const [form, setForm] = useState<{ startupName: string; tsheetLink: string }>(() => {
-    try { const s = localStorage.getItem(LS_KEY); if (s) return JSON.parse(s); } catch { /* ignore */ }
-    return { startupName: "", tsheetLink: "" };
-  });
-  const [fathom, setFathom] = useState<File | null>(null);
-  useEffect(() => { try { localStorage.setItem(LS_KEY, JSON.stringify(form)); } catch { /* ignore */ } }, [form]);
+  // Text fields persist across tab switches / reloads (files must be re-attached).
+  const [form, setForm] = usePersistentState("builder:summary:newForm", { startupName: "", tsheetLink: "" });
+  const [fathom1, setFathom1] = useState<File | null>(null);
+  const [fathom2, setFathom2] = useState<File | null>(null);
 
   const submit = useMutation({
     mutationFn: async () => {
       const fd = new FormData();
       fd.append("startup_name", form.startupName.trim());
       fd.append("tsheet_link", form.tsheetLink.trim());
-      if (fathom) fd.append("fathom", fathom);
+      if (fathom1) fd.append("fathom_1", fathom1);
+      if (fathom2) fd.append("fathom_2", fathom2);
       const res = await fetch(`${BASE}/api/builder/summary-builds`, { method: "POST", credentials: "include", body: fd });
       if (!res.ok) throw new Error(await readErr(res, "Build failed"));
       return (await res.json()).build as FullSummaryBuild;
     },
     onSuccess: (b) => {
-      try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
-      toast({ title: "Pulled from T-Sheet", description: fathom ? "Fathom fields extracted. Review below." : "Review and fill the fields below." });
+      try { localStorage.removeItem("builder:summary:newForm"); } catch { /* ignore */ }
+      toast({ title: "Pulled from T-Sheet", description: (fathom1 || fathom2) ? "Fathom fields extracted. Review below." : "Review and fill the fields below." });
       onCreated(b.id);
     },
     onError: (err: any) => toast({ title: "Couldn't build", description: err.message, variant: "destructive" }),
@@ -899,10 +918,13 @@ function NewSummaryForm({ onCancel, onCreated }: { onCancel: () => void; onCreat
               className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" />
           </Field>
         </div>
-        <div className="mt-5">
-          <FileSlot label="Fathom Transcript" accept=".vtt,.srt,.txt,.docx,.md"
-            hint="Optional. AI extracts Revenue / Industry / Critical Venture / TS Connects / TS Support."
-            file={fathom} onChange={setFathom} />
+        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FileSlot label="Fathom Transcript 1" accept=".vtt,.srt,.txt,.docx,.md"
+            hint="Optional. Fed to the AI for Revenue / Industry / Critical Venture / Connects / Support."
+            file={fathom1} onChange={setFathom1} />
+          <FileSlot label="Fathom Transcript 2" accept=".vtt,.srt,.txt,.docx,.md"
+            hint="Optional. Combined with transcript 1 for extraction."
+            file={fathom2} onChange={setFathom2} />
         </div>
         <div className="mt-6 flex items-center justify-end gap-2">
           <button onClick={onCancel} className="rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-muted">Cancel</button>

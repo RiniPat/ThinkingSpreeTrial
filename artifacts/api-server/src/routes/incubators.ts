@@ -194,6 +194,9 @@ router.get("/incubators/:id", async (req, res) => {
         level: f.level,
         tSprintIntervention: f.tSprintIntervention,
         tasks: f.tasks,
+        // Extra Wadhwani Summary Builder fields (TG, Funding, VP1/VP2 dates,
+        // Critical Venture, etc.) stored verbatim on commit.
+        wadhwani: ((f.excelData as any)?.wadhwaniSummary) ?? null,
         // Sprint counts
         sprintCount: sprints.length,
         lastSprintDate: lastSprint?.scheduledDate ?? null,

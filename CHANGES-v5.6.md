@@ -89,7 +89,42 @@ Fix:
 This affects both Builder modes, since both extract uploaded files through the
 same path.
 
+## Summary Builder — refinements & fixes (this round)
 
+**Image-only / scanned PDFs now work (OCR fallback).** When a PDF has no
+selectable text layer (e.g. the Strategic Focus Canvas exported as an image),
+extraction falls back to Gemini vision OCR — the raw PDF is sent to
+`gemini-2.5-flash` to transcribe its text. Applies to *both* Builder modes, so
+the "…appears empty. Make sure the PDF has selectable text" error no longer
+blocks an image PDF (`fileExtract.ts`). Needs `GEMINI_API_KEY`; files >14MB are
+skipped.
+
+**Builder state survives tab switches, navigating away, and reloads.** A new
+`usePersistentState` hook mirrors Builder state to `localStorage`: which mode
+(Growth vs Summary), which report/build is open, and the in-progress New-form
+text. Summary review edits were already auto-saved per build; navigation is now
+too, so returning reopens where you left off. (Uploaded files still need
+re-attaching after a *hard* reload — browsers won't let us persist file bytes —
+but once you've pulled/uploaded, the draft is saved server-side and reopens
+fully.)
+
+**Two Fathom transcripts.** The New Summary form now has Transcript 1 & 2 slots;
+both are extracted, combined, and sent to the AI together (`fathom_1`/`fathom_2`).
+
+**AI prompts match the exact questions** for Current Revenue (ARR), Industry
+Detail (one short phrase), Critical Venture (one short phrase), Thinking Spree
+Connects, and TS Support apart from connects.
+
+**T-Sheet mapping confirmed** — Startup/Founder from Overview, Host from
+"T-Sprint Consultants Assigned", Co-Host from the cell beside it, Sheet Link =
+submitted URL. The parser already reads exactly this, so no change was needed.
+
+**Summary tab shows the Wadhwani fields.** Beyond the already-mapped Industry /
+Revenue / Market Access (TS Connects) / T-Sprint Intervention (TS Support), the
+venture detail now also shows **TG, Funding, Critical Venture, VP1 Call Date,
+and VP2 Call Date** when present (hidden for non-Wadhwani ventures).
+
+## Notes / caveats
 - VP date lookup matches an **existing** tracked company by name; if the venture
   isn't in Sprint Tracking yet, VP1/VP2 come back blank and you fill them in
   during review. `sprints.scheduled_date` is stored as text, so ordering assumes

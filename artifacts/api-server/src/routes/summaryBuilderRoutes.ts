@@ -135,7 +135,10 @@ async function lookupVpDates(companyName: string): Promise<{ vp1: string | null;
 }
 
 // ── Step 1: create + pull (+ optional Fathom extract) ────────────────────
-router.post("/builder/summary-builds", upload.single("fathom"), async (req, res) => {
+router.post("/builder/summary-builds", upload.fields([
+  { name: "fathom_1", maxCount: 1 },
+  { name: "fathom_2", maxCount: 1 },
+]), async (req, res) => {
   const me = await getMe(req, res); if (!me) return;
   if (!canAccessResearch(me.role)) { res.status(403).json({ error: "Not authorized" }); return; }
 
@@ -152,12 +155,18 @@ router.post("/builder/summary-builds", upload.single("fathom"), async (req, res)
     // Prefer the T-Sheet's company name if present; fall back to typed name.
     pulled.startupName = pulled.startupName || startupName;
 
-    // Optional Fathom transcript → AI extract.
+    // Optional Fathom transcripts (1 & 2) → combined → AI extract.
     let fathomText: string | null = null;
     let ai: SummaryAiFields = emptySummaryAiFields();
-    const file = (req as any).file as Express.Multer.File | undefined;
-    if (file) {
-      fathomText = await extractTextFromUpload(file.originalname, file.buffer);
+    const filesMap = (req as any).files as Record<string, Express.Multer.File[]> | undefined;
+    const fathomFiles = [filesMap?.fathom_1?.[0], filesMap?.fathom_2?.[0]].filter(Boolean) as Express.Multer.File[];
+    if (fathomFiles.length) {
+      const parts: string[] = [];
+      for (const f of fathomFiles) {
+        const t = await extractTextFromUpload(f.originalname, f.buffer);
+        if (t) parts.push(t);
+      }
+      fathomText = parts.join("\n\n---\n\n").trim() || null;
       if (fathomText && fathomText.length > 40) {
         ai = await extractSummaryFields({
           startupName: pulled.startupName,

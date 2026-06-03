@@ -146,6 +146,11 @@ type FullVenture = {
   level?: string | null;
   tSprintIntervention?: string | null;
   tasks?: string | null;
+  wadhwani?: {
+    tg?: string; funding?: string; vp1Date?: string | null; vp2Date?: string | null;
+    criticalVenture?: string; industryDetail?: string; currentRevenueArr?: string;
+    tsConnects?: string; tsSupport?: string; notes?: string;
+  } | null;
   // Counts
   sprintCount: number; completedSprints: number;
   lastSprintDate?: string | null; lastSprintStatus?: string | null;
@@ -245,6 +250,12 @@ function VentureDetailModal({ venture, onClose }: { venture: FullVenture; onClos
               <Field label="Next 5 Sprints" value={venture.nextFiveSprints} fullWidth />
               <Field label="T-Sprint Intervention" value={venture.tSprintIntervention} fullWidth />
               <Field label="Tasks" value={venture.tasks} fullWidth />
+              {/* Wadhwani Summary Builder fields (only show when present) */}
+              <Field label="Target Group (TG)" value={venture.wadhwani?.tg} />
+              <Field label="Funding" value={venture.wadhwani?.funding} />
+              <Field label="Critical Venture" value={venture.wadhwani?.criticalVenture} fullWidth />
+              <Field label="VP1 Call Date" value={venture.wadhwani?.vp1Date} />
+              <Field label="VP2 Call Date" value={venture.wadhwani?.vp2Date} />
               <Field label="Partner" value={venture.partnerName} />
               {venture.fathomLink && (
                 <div className="col-span-2">
