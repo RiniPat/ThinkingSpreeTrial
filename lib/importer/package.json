@@ -1,0 +1,22 @@
+{
+  "name": "@workspace/importer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "dependencies": {
+    "@workspace/db": "workspace:*",
+    "drizzle-orm": "catalog:",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
+  }
+}
