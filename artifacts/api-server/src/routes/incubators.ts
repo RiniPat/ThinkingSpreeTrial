@@ -54,7 +54,7 @@ function isSummarySourceForType(type: string): string[] | null {
   // consultant actions, not bulk imports). `manual_curation` covers companies
   // a consultant explicitly added/moved into a cohort via the edit dialog —
   // those should surface on the Summary page just like an upload would.
-  return [...legacy, "sprint_template_upload", "google_sheets_sync", "manual_curation"];
+  return [...legacy, "sprint_template_upload", "google_sheets_sync", "manual_curation", "summary_builder"];
 }
 
 router.get("/incubators", async (req, res) => {

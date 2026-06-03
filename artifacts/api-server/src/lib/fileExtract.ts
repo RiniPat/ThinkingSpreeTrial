@@ -2,7 +2,7 @@
  * Best-effort text extraction for uploaded files.
  *
  * Supported MIME types / extensions:
- *   - application/pdf   → pdf-parse
+ *   - application/pdf   → unpdf (serverless pdf.js, no DOM needed)
  *   - .docx             → mammoth
  *   - .vtt / .srt / .txt → naive UTF-8 decode + cleanup
  *
@@ -34,18 +34,19 @@ export async function extractTextFromUpload(filename: string, buffer: Buffer): P
   const lower = filename.toLowerCase();
 
   if (lower.endsWith(".pdf")) {
-    // pdf-parse v2 exposes a PDFParse class (not a default function as in v1).
-    // We import dynamically to avoid loading the heavy PDF.js worker at
-    // module-load time — only when a PDF actually needs parsing.
-    const { PDFParse } = await import("pdf-parse");
-    const parser = new PDFParse({ data: new Uint8Array(buffer) });
-    try {
-      const result = await parser.getText();
-      return (result.text ?? "").trim();
-    } finally {
-      // Always release the underlying PDF.js document to free memory.
-      await parser.destroy().catch(() => undefined);
-    }
+    // Use `unpdf` — a serverless/Node-safe build of pdf.js. The default
+    // `pdf-parse`/`pdfjs-dist` browser build references DOM globals (DOMMatrix,
+    // Path2D, ImageData) that don't exist under Node and throws
+    // "DOMMatrix is not defined" on upload. unpdf ships a build that runs in
+    // plain Node with no DOM, canvas, or worker setup.
+    //
+    // Imported dynamically so the (large) pdf.js bundle only loads when a PDF
+    // is actually parsed.
+    const { getDocumentProxy, extractText } = await import("unpdf");
+    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    const { text } = await extractText(pdf, { mergePages: true });
+    // mergePages:true returns a single string; guard the array case anyway.
+    return (Array.isArray(text) ? text.join("\n\n") : text ?? "").trim();
   }
 
   if (lower.endsWith(".docx")) {

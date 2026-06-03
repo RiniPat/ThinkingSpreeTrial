@@ -6,10 +6,33 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import {
   FileText, Upload, Sparkles, Loader2, Download, ChevronRight, ArrowLeft,
-  CheckCircle2, AlertCircle, Trash2, FileEdit, Wand2,
+  CheckCircle2, AlertCircle, Trash2, FileEdit, Wand2, Save, RefreshCw, Plus, Building2,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+/**
+ * Read a useful error message off a failed Response without throwing.
+ *
+ * When the API crashes hard (e.g. an extraction library blows up, or the dyno
+ * returns a 502 with an HTML/empty body), `res.json()` throws
+ * "Unexpected end of JSON input", which masks the real failure. This reads the
+ * body as text once, tries to parse JSON, and otherwise returns the raw text or
+ * a status-based fallback.
+ */
+async function readErr(res: Response, fallback: string): Promise<string> {
+  let body = "";
+  try { body = await res.text(); } catch { /* ignore */ }
+  if (body) {
+    try {
+      const j = JSON.parse(body);
+      if (j && (j.error || j.message)) return j.error || j.message;
+    } catch { /* not JSON — fall through to raw text */ }
+    const trimmed = body.trim();
+    if (trimmed && !trimmed.startsWith("<")) return trimmed.slice(0, 300);
+  }
+  return `${fallback} (HTTP ${res.status}${res.statusText ? " " + res.statusText : ""})`;
+}
 
 // ───────────────────────── Types (mirror backend) ────────────────────────
 type RAG = "RED" | "AMBER" | "GREEN" | "";
@@ -89,10 +112,10 @@ export default function BuilderPage() {
             <ReportLibrary onOpen={setActiveId} onNew={() => setCreatingNew(true)} />
           )
         ) : (
-          <SummaryPlaceholder />
+          <SummaryBuilder />
         )}
 
-        <footer className="pt-2 text-center text-xs text-muted-foreground">Thinking Spree · Consultant Suite v5.4</footer>
+        <footer className="pt-2 text-center text-xs text-muted-foreground">Thinking Spree · Consultant Suite v5.6</footer>
       </main>
     </Layout>
   );
@@ -204,7 +227,7 @@ function NewReportForm({ onCancel, onCreated }: { onCancel: () => void; onCreate
       const res = await fetch(`${BASE}/api/builder/growth-reports`, {
         method: "POST", credentials: "include", body: fd,
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Upload failed");
+      if (!res.ok) throw new Error(await readErr(res, "Upload failed"));
       return (await res.json()).report as FullReport;
     },
     onSuccess: (r) => {
@@ -351,7 +374,7 @@ function ReportWorkflow({ id, onBack }: { id: number; onBack: () => void }) {
       const res = await fetch(`${BASE}/api/builder/growth-reports/${id}/extract-anchors`, {
         method: "POST", credentials: "include",
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Extraction failed");
+      if (!res.ok) throw new Error(await readErr(res, "Extraction failed"));
       return res.json();
     },
     onSuccess: () => {
@@ -376,7 +399,7 @@ function ReportWorkflow({ id, onBack }: { id: number; onBack: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ anchors }),
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Save failed");
+      if (!res.ok) throw new Error(await readErr(res, "Save failed"));
     },
     onSuccess: () => toast({ title: "Anchors saved" }),
     onError: (err: any) => toast({ title: "Save failed", description: err.message, variant: "destructive" }),
@@ -396,7 +419,7 @@ function ReportWorkflow({ id, onBack }: { id: number; onBack: () => void }) {
       const res = await fetch(`${BASE}/api/builder/growth-reports/${id}/generate-report`, {
         method: "POST", credentials: "include",
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Generation failed");
+      if (!res.ok) throw new Error(await readErr(res, "Generation failed"));
       return res.json();
     },
     onSuccess: () => {
@@ -666,19 +689,417 @@ function RagSelector({ value, onChange }: { value: RAG; onChange: (v: RAG) => vo
   );
 }
 
-// ───────────────────────── Summary placeholder (Phase B) ─────────────────
-function SummaryPlaceholder() {
+// ═════════════════════════ Summary Builder (Phase B) ═════════════════════
+// Pulls the venture scaffold from the T-Sheet, AI-extracts the Wadhwani Fathom
+// fields, looks up VP1/VP2 dates from Sprint Tracking, lets the consultant
+// review/edit (with color-chip dropdowns), then commits a venture row to the
+// Summary Sheet tab under the Wadhwani Foundation companies cohort.
+
+type ChipOption = { value: string; color: string };
+
+// Colors sampled from the program's industry / TG palettes. Both lists are
+// extendable — consultants can type a custom value in the field below the chips.
+const INDUSTRY_OPTIONS: ChipOption[] = [
+  { value: "Manufacturing", color: "#E6E6E6" },
+  { value: "Fintech",       color: "#D2EDBC" },
+  { value: "Healthtech",    color: "#AF0201" },
+  { value: "Tech",          color: "#FEC7A9" },
+  { value: "AI",            color: "#FEE5A0" },
+  { value: "SaaS",          color: "#C5DAE2" },
+  { value: "Ed Tech",       color: "#E6CFF3" },
+  { value: "FMCG",          color: "#3D3D3D" },
+  { value: "Retail",        color: "#FCD0CA" },
+  { value: "Legal",         color: "#763C09" },
+];
+const TG_OPTIONS: ChipOption[] = [
+  { value: "B2C",        color: "#FCCCC0" },
+  { value: "B2B",        color: "#FCC09C" },
+  { value: "D2C",        color: "#E4CCF0" },
+  { value: "B2B + D2C",  color: "#FCE49C" },
+  { value: "B2B + B2C",  color: "#CCE4B4" },
+  { value: "B2G",        color: "#B4D8F0" },
+  { value: "B2G + D2C",  color: "#C0D8D8" },
+  { value: "B2G + B2C",  color: "#3C3C3C" },
+  { value: "B2G + B2B",  color: "#A80000" },
+];
+const FUNDING_OPTIONS: ChipOption[] = [
+  { value: "Funded",       color: "#D2EDBC" },
+  { value: "Bootstrapped", color: "#FEE5A0" },
+  { value: "NA",           color: "#E6E6E6" },
+];
+
+/** Pick readable text color (black/white) for a hex background by luminance. */
+function textOn(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.6 ? "#1f2937" : "#ffffff";
+}
+
+type SummaryFields = {
+  startupName: string; founder: string; host: string; coHost: string; goal: string;
+  industry: string; tg: string; funding: string;
+  currentRevenueArr: string; industryDetail: string; criticalVenture: string;
+  tsConnects: string; tsSupport: string;
+  vp1Date: string | null; vp2Date: string | null; notes: string;
+};
+
+type SummaryStatus = "drafting" | "ready" | "committed" | "failed";
+type SummaryListItem = {
+  id: number; startupName: string; cohort: string | null;
+  status: SummaryStatus; founderId: number | null; createdAt: string; updatedAt: string;
+};
+type FullSummaryBuild = {
+  id: number; startupName: string; cohort: string | null; tsheetLink: string | null;
+  status: SummaryStatus; errorMessage: string | null;
+  pulled: any; aiFields: any; fields: SummaryFields | null;
+  founderId: number | null; hasFathom: boolean; createdAt: string; updatedAt: string;
+};
+
+function SummaryBuilder() {
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [creatingNew, setCreatingNew] = useState(false);
+
+  if (activeId !== null) return <SummaryWorkflow id={activeId} onBack={() => setActiveId(null)} />;
+  if (creatingNew) return <NewSummaryForm onCancel={() => setCreatingNew(false)} onCreated={(id) => { setCreatingNew(false); setActiveId(id); }} />;
+  return <SummaryLibrary onOpen={setActiveId} onNew={() => setCreatingNew(true)} />;
+}
+
+function SummaryStatusBadge({ status }: { status: SummaryStatus }) {
+  const map: Record<SummaryStatus, { label: string; cls: string }> = {
+    drafting:  { label: "Drafting",  cls: "bg-amber-50 text-amber-800 border-amber-200" },
+    ready:     { label: "Ready",     cls: "bg-blue-50 text-blue-700 border-blue-200" },
+    committed: { label: "Committed", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+    failed:    { label: "Failed",    cls: "bg-rose-50 text-rose-700 border-rose-200" },
+  };
+  const m = map[status];
+  return <span className={`whitespace-nowrap inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${m.cls}`}>{m.label}</span>;
+}
+
+function SummaryLibrary({ onOpen, onNew }: { onOpen: (id: number) => void; onNew: () => void }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery<{ builds: SummaryListItem[] }>({
+    queryKey: ["summary-builds"],
+    queryFn: () => customFetch(`${BASE}/api/builder/summary-builds`, { credentials: "include" }),
+  });
+
+  const del = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`${BASE}/api/builder/summary-builds/${id}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) throw new Error("Delete failed");
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["summary-builds"] }); toast({ title: "Deleted" }); },
+  });
+
+  const builds = data?.builds ?? [];
+
   return (
-    <section className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
-      <h3 className="font-serif text-xl text-foreground">Summary Builder — coming next</h3>
-      <p className="mt-2 text-sm text-muted-foreground max-w-md mx-auto">
-        Pulls Startup Name, Founder, Host, Co-Host, Goal from the T-Sheet, plus Industry / TG /
-        Funding dropdowns, plus VP call dates from Sprint Tracking, plus AI-extracted fields
-        from the Fathom transcript. Wires into the existing Summary Sheet tab.
-      </p>
-      <p className="mt-3 text-[11px] text-muted-foreground">
-        Phase B — ship in the next session.
-      </p>
+    <section className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-serif text-2xl text-foreground">Summary Builder</h2>
+          <p className="mt-1 text-sm text-muted-foreground max-w-2xl">
+            Build a Wadhwani-format venture summary from the T-Sheet + Fathom transcript, then commit it
+            to the Summary Sheet tab.
+          </p>
+        </div>
+        <button onClick={onNew}
+          className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90">
+          <Plus className="h-4 w-4" /> New Summary
+        </button>
+      </div>
+
+      {isLoading ? (
+        <div className="grid gap-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-lg" />)}</div>
+      ) : builds.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
+          <Building2 className="mx-auto h-10 w-10 text-muted-foreground/30" />
+          <p className="mt-3 font-semibold text-foreground">No summaries yet</p>
+          <p className="mt-1 text-sm text-muted-foreground">Start one from a T-Sheet link and (optionally) a Fathom transcript.</p>
+          <button onClick={onNew} className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90">
+            <Plus className="h-4 w-4" /> New Summary
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {builds.map(b => (
+            <div key={b.id} className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 hover:border-primary/40 transition">
+              <button onClick={() => onOpen(b.id)} className="flex-1 min-w-0 text-left">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-foreground truncate">{b.startupName}</span>
+                  <SummaryStatusBadge status={b.status} />
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  {b.cohort ?? "Wadhwani Foundation companies"} · updated {new Date(b.updatedAt).toLocaleDateString()}
+                </div>
+              </button>
+              <button onClick={() => onOpen(b.id)} className="rounded p-1.5 text-muted-foreground hover:bg-muted"><ChevronRight className="h-4 w-4" /></button>
+              <button onClick={() => del.mutate(b.id)} className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-destructive"><Trash2 className="h-4 w-4" /></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NewSummaryForm({ onCancel, onCreated }: { onCancel: () => void; onCreated: (id: number) => void }) {
+  const { toast } = useToast();
+  const LS_KEY = "summaryBuilder:newForm";
+  // Rehydrate from localStorage so progress survives a tab switch / refresh.
+  const [form, setForm] = useState<{ startupName: string; tsheetLink: string }>(() => {
+    try { const s = localStorage.getItem(LS_KEY); if (s) return JSON.parse(s); } catch { /* ignore */ }
+    return { startupName: "", tsheetLink: "" };
+  });
+  const [fathom, setFathom] = useState<File | null>(null);
+  useEffect(() => { try { localStorage.setItem(LS_KEY, JSON.stringify(form)); } catch { /* ignore */ } }, [form]);
+
+  const submit = useMutation({
+    mutationFn: async () => {
+      const fd = new FormData();
+      fd.append("startup_name", form.startupName.trim());
+      fd.append("tsheet_link", form.tsheetLink.trim());
+      if (fathom) fd.append("fathom", fathom);
+      const res = await fetch(`${BASE}/api/builder/summary-builds`, { method: "POST", credentials: "include", body: fd });
+      if (!res.ok) throw new Error(await readErr(res, "Build failed"));
+      return (await res.json()).build as FullSummaryBuild;
+    },
+    onSuccess: (b) => {
+      try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
+      toast({ title: "Pulled from T-Sheet", description: fathom ? "Fathom fields extracted. Review below." : "Review and fill the fields below." });
+      onCreated(b.id);
+    },
+    onError: (err: any) => toast({ title: "Couldn't build", description: err.message, variant: "destructive" }),
+  });
+
+  const canSubmit = form.startupName.trim() && form.tsheetLink.trim();
+
+  return (
+    <section className="space-y-4">
+      <button onClick={onCancel} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+        <ArrowLeft className="h-4 w-4" /> Back to Summaries
+      </button>
+      <div className="rounded-xl border border-border bg-card p-6">
+        <h2 className="font-serif text-2xl text-foreground">New Summary</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Pulls Startup / Founder / Host / Co-Host / Goal from the T-Sheet and VP1/VP2 dates from Sprint
+          Tracking. Add a Fathom transcript to auto-fill Revenue, Industry detail, Critical Venture, and TS
+          Connects / Support.
+        </p>
+        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Field label="Startup Name" required>
+            <input type="text" value={form.startupName} onChange={(e) => setForm({ ...form, startupName: e.target.value })}
+              placeholder="e.g. Bull AgriTech"
+              className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" />
+          </Field>
+          <Field label="T-Sheet Link" required hint="Google Sheets URL for the Sprint Template">
+            <input type="url" value={form.tsheetLink} onChange={(e) => setForm({ ...form, tsheetLink: e.target.value })}
+              placeholder="https://docs.google.com/spreadsheets/d/..."
+              className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" />
+          </Field>
+        </div>
+        <div className="mt-5">
+          <FileSlot label="Fathom Transcript" accept=".vtt,.srt,.txt,.docx,.md"
+            hint="Optional. AI extracts Revenue / Industry / Critical Venture / TS Connects / TS Support."
+            file={fathom} onChange={setFathom} />
+        </div>
+        <div className="mt-6 flex items-center justify-end gap-2">
+          <button onClick={onCancel} className="rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-muted">Cancel</button>
+          <button onClick={() => submit.mutate()} disabled={!canSubmit || submit.isPending}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50">
+            {submit.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+            {submit.isPending ? "Pulling…" : "Pull & Continue"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ChipSelect({ value, onChange, options, allowCustom = true }: {
+  value: string; onChange: (v: string) => void; options: ChipOption[]; allowCustom?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-1.5">
+        {options.map(o => {
+          const selected = value === o.value;
+          return (
+            <button key={o.value} type="button" onClick={() => onChange(o.value)}
+              style={{ backgroundColor: o.color, color: textOn(o.color) }}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition ${selected ? "ring-2 ring-offset-1 ring-ring border-transparent" : "border-black/10 opacity-85 hover:opacity-100"}`}>
+              {o.value}
+            </button>
+          );
+        })}
+      </div>
+      {allowCustom && (
+        <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder="or type a custom value"
+          className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" />
+      )}
+    </div>
+  );
+}
+
+function SummaryWorkflow({ id, onBack }: { id: number; onBack: () => void }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const LS_KEY = `summaryBuilder:fields:${id}`;
+
+  const { data, isLoading } = useQuery<{ build: FullSummaryBuild }>({
+    queryKey: ["summary-build", id],
+    queryFn: () => customFetch(`${BASE}/api/builder/summary-builds/${id}`, { credentials: "include" }),
+  });
+  const build = data?.build;
+
+  const [fields, setFields] = useState<SummaryFields | null>(null);
+  // Initialise from server, but prefer locally-saved edits (tab-switch safety).
+  useEffect(() => {
+    if (!build?.fields) return;
+    let local: SummaryFields | null = null;
+    try { const s = localStorage.getItem(LS_KEY); if (s) local = JSON.parse(s); } catch { /* ignore */ }
+    setFields(local ?? build.fields);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [build?.id]);
+  useEffect(() => {
+    if (fields) { try { localStorage.setItem(LS_KEY, JSON.stringify(fields)); } catch { /* ignore */ } }
+  }, [fields, LS_KEY]);
+
+  function set<K extends keyof SummaryFields>(k: K, v: SummaryFields[K]) {
+    setFields(f => (f ? { ...f, [k]: v } : f));
+  }
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${BASE}/api/builder/summary-builds/${id}`, {
+        method: "PATCH", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields }),
+      });
+      if (!res.ok) throw new Error(await readErr(res, "Save failed"));
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["summary-build", id] }); toast({ title: "Saved" }); },
+    onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
+  });
+
+  const rerun = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${BASE}/api/builder/summary-builds/${id}/extract`, { method: "POST", credentials: "include" });
+      if (!res.ok) throw new Error(await readErr(res, "Extract failed"));
+      return (await res.json()).fields as SummaryFields;
+    },
+    onSuccess: (merged) => { setFields(merged); toast({ title: "AI re-extracted", description: "Blank fields filled from the transcript." }); },
+    onError: (e: any) => toast({ title: "Extract failed", description: e.message, variant: "destructive" }),
+  });
+
+  const commit = useMutation({
+    mutationFn: async () => {
+      // Save current edits first so the server commits exactly what's on screen.
+      const r1 = await fetch(`${BASE}/api/builder/summary-builds/${id}`, {
+        method: "PATCH", credentials: "include",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fields }),
+      });
+      if (!r1.ok) throw new Error(await readErr(r1, "Save failed"));
+      const r2 = await fetch(`${BASE}/api/builder/summary-builds/${id}/commit`, { method: "POST", credentials: "include" });
+      if (!r2.ok) throw new Error(await readErr(r2, "Commit failed"));
+      return r2.json();
+    },
+    onSuccess: () => {
+      try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
+      qc.invalidateQueries({ queryKey: ["summary-build", id] });
+      qc.invalidateQueries({ queryKey: ["summary-builds"] });
+      toast({ title: "Committed to Summary Sheet", description: "The venture now appears under the Wadhwani cohort on the Summary tab." });
+    },
+    onError: (e: any) => toast({ title: "Commit failed", description: e.message, variant: "destructive" }),
+  });
+
+  if (isLoading || !build || !fields) {
+    return (
+      <section className="space-y-4">
+        <button onClick={onBack} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" /> Back</button>
+        <Skeleton className="h-72 rounded-xl" />
+      </section>
+    );
+  }
+
+  const committed = build.status === "committed";
+
+  return (
+    <section className="space-y-4">
+      <button onClick={onBack} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+        <ArrowLeft className="h-4 w-4" /> Back to Summaries
+      </button>
+
+      {build.status === "failed" && build.errorMessage && (
+        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 flex items-center gap-2">
+          <AlertCircle className="h-3.5 w-3.5" /> {build.errorMessage}
+        </div>
+      )}
+      {committed && (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 flex items-center gap-2">
+          <CheckCircle2 className="h-3.5 w-3.5" /> Committed to the Summary Sheet tab under {build.cohort ?? "Wadhwani Foundation companies"}. Re-committing updates the same venture.
+        </div>
+      )}
+
+      <div className="rounded-xl border border-border bg-card p-6 space-y-5">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="font-serif text-2xl text-foreground">{fields.startupName || build.startupName}</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">Review &amp; edit, then commit to the Summary Sheet tab.</p>
+          </div>
+          {build.hasFathom && (
+            <button onClick={() => rerun.mutate()} disabled={rerun.isPending}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-60">
+              {rerun.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Re-run AI
+            </button>
+          )}
+        </div>
+
+        {/* From the T-Sheet */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Field label="Startup Name"><input value={fields.startupName} onChange={e => set("startupName", e.target.value)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="Founder"><input value={fields.founder} onChange={e => set("founder", e.target.value)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="Host"><input value={fields.host} onChange={e => set("host", e.target.value)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="Co-Host"><input value={fields.coHost} onChange={e => set("coHost", e.target.value)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+        </div>
+        <Field label="Goal"><textarea value={fields.goal} onChange={e => set("goal", e.target.value)} rows={2} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+
+        {/* Dropdowns */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Field label="Industry" hint="Pick a chip or type your own"><ChipSelect value={fields.industry} onChange={v => set("industry", v)} options={INDUSTRY_OPTIONS} /></Field>
+          <Field label="TG (Target Group)" hint="Pick a chip or type your own"><ChipSelect value={fields.tg} onChange={v => set("tg", v)} options={TG_OPTIONS} /></Field>
+          <Field label="Funding"><ChipSelect value={fields.funding} onChange={v => set("funding", v)} options={FUNDING_OPTIONS} allowCustom={false} /></Field>
+        </div>
+
+        {/* VP dates (from Sprint Tracking, editable) */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Field label="VP1 Date" hint="Looked up from Sprint Tracking"><input type="date" value={fields.vp1Date ?? ""} onChange={e => set("vp1Date", e.target.value || null)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="VP2 Date" hint="Looked up from Sprint Tracking"><input type="date" value={fields.vp2Date ?? ""} onChange={e => set("vp2Date", e.target.value || null)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+        </div>
+
+        {/* AI-extracted (editable) */}
+        <div className="grid grid-cols-1 gap-4">
+          <Field label="Current Revenue / ARR"><input value={fields.currentRevenueArr} onChange={e => set("currentRevenueArr", e.target.value)} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="Industry Detail"><textarea value={fields.industryDetail} onChange={e => set("industryDetail", e.target.value)} rows={2} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="Critical Venture"><textarea value={fields.criticalVenture} onChange={e => set("criticalVenture", e.target.value)} rows={2} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="TS Connects" hint="Market-access introductions"><textarea value={fields.tsConnects} onChange={e => set("tsConnects", e.target.value)} rows={2} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="TS Support" hint="Support beyond connects"><textarea value={fields.tsSupport} onChange={e => set("tsSupport", e.target.value)} rows={2} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+          <Field label="Notes" hint="Internal — not sent anywhere"><textarea value={fields.notes} onChange={e => set("notes", e.target.value)} rows={2} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring/20" /></Field>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-4">
+          <button onClick={() => save.mutate()} disabled={save.isPending}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-60">
+            {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+          </button>
+          <button onClick={() => commit.mutate()} disabled={commit.isPending}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50">
+            {commit.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+            {committed ? "Re-commit to Summary Sheet" : "Commit to Summary Sheet"}
+          </button>
+        </div>
+      </div>
     </section>
   );
 }

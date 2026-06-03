@@ -51,17 +51,12 @@ async function buildAll() {
       "mongodb-client-encryption",
       "nodemailer",
       "handlebars",
-      // pdf-parse v2 bundles pdfjs-dist, which loads its worker as a sibling
-      // module (pdf.worker.mjs) resolved relative to its own file. If we let
-      // esbuild bundle it into dist/index.mjs, that worker path resolves to
-      // dist/pdf.worker.mjs — a file that doesn't exist — producing the
-      // "Setting up fake worker failed: Cannot find module .../dist/pdf.worker.mjs"
-      // error on upload. Keeping these external means the dynamic
-      // `import("pdf-parse")` in fileExtract.ts resolves from node_modules,
-      // where the worker file actually ships alongside the package.
-      "pdf-parse",
-      "pdfjs-dist",
-      "@napi-rs/canvas",
+      // PDF text extraction uses `unpdf` (a serverless/Node build of pdf.js
+      // that needs no DOM globals). We externalize it so its bundled pdf.js
+      // assets resolve from node_modules at runtime rather than being inlined
+      // into dist/index.mjs (which previously broke worker resolution and, with
+      // the browser build of pdf.js, threw "DOMMatrix is not defined" in Node).
+      "unpdf",
       "knex",
       "typeorm",
       "protobufjs",
