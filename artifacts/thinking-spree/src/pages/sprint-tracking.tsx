@@ -192,6 +192,8 @@ export default function SprintTrackingPage() {
   // Consultants can flip to "Mine only" if they want their own view.
   const [scope, setScope] = useState<"all" | "mine">("all");
   const [addOpen, setAddOpen] = useState(false);
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 50;
   const sprintsQuery = useQuery<Sprint[]>({
     queryKey: ["/api/sprints", scope],
     queryFn: () => customFetch<Sprint[]>(`${BASE}/api/sprints?scope=${scope}`, { credentials: "include" }),
@@ -312,6 +314,15 @@ export default function SprintTrackingPage() {
     });
     return out;
   }, [filtered, sortKey, sortDir]);
+
+  // Pagination — render one page at a time so the DOM stays light even when the
+  // team-wide register has thousands of rows.
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  useEffect(() => { if (page > pageCount - 1) setPage(0); }, [pageCount, page]);
+  const pageRows = useMemo(
+    () => sorted.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE),
+    [sorted, page],
+  );
 
   function toggleSort(k: SortKey) {
     if (sortKey === k) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -522,14 +533,20 @@ export default function SprintTrackingPage() {
                 <p className="text-xs text-muted-foreground/60 mt-1">Try clearing some filters above</p>
               </div>
             ) : view === "table" ? (
-              <SprintTable sorted={sorted} sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort}
-                onRowClick={(id) => setLocation(`/sprints/${id}`)} scopeKey={scope} />
+              <>
+                <SprintTable sorted={pageRows} sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort}
+                  onRowClick={(id) => setLocation(`/sprints/${id}`)} scopeKey={scope} />
+                <Pager page={page} pageCount={pageCount} total={sorted.length} pageSize={PAGE_SIZE} onPage={setPage} />
+              </>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {sorted.map(sprint => (
-                  <SprintCard key={sprint.id} sprint={sprint} onClick={() => setLocation(`/sprints/${sprint.id}`)} />
-                ))}
-              </div>
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {pageRows.map(sprint => (
+                    <SprintCard key={sprint.id} sprint={sprint} onClick={() => setLocation(`/sprints/${sprint.id}`)} />
+                  ))}
+                </div>
+                <Pager page={page} pageCount={pageCount} total={sorted.length} pageSize={PAGE_SIZE} onPage={setPage} />
+              </>
             )}
           </>
         )}
@@ -580,6 +597,31 @@ function SortHeader({ label, k, sortKey, sortDir, toggleSort }: {
 }
 
 const FIELD_INPUT_CLS = "w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30";
+
+/** Simple pager — keeps the rendered DOM light on the team-wide register. */
+function Pager({ page, pageCount, total, pageSize, onPage }: {
+  page: number; pageCount: number; total: number; pageSize: number; onPage: (p: number) => void;
+}) {
+  if (total <= pageSize) return null;
+  const from = page * pageSize + 1;
+  const to = Math.min(total, (page + 1) * pageSize);
+  return (
+    <div className="mt-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+      <span>Showing <span className="font-medium text-foreground tabular-nums">{from}–{to}</span> of <span className="font-medium text-foreground tabular-nums">{total}</span></span>
+      <div className="flex items-center gap-1">
+        <button onClick={() => onPage(0)} disabled={page === 0}
+          className="px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-40">« First</button>
+        <button onClick={() => onPage(Math.max(0, page - 1))} disabled={page === 0}
+          className="px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-40">‹ Prev</button>
+        <span className="px-2 tabular-nums">Page {page + 1} / {pageCount}</span>
+        <button onClick={() => onPage(Math.min(pageCount - 1, page + 1))} disabled={page >= pageCount - 1}
+          className="px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-40">Next ›</button>
+        <button onClick={() => onPage(pageCount - 1)} disabled={page >= pageCount - 1}
+          className="px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-40">Last »</button>
+      </div>
+    </div>
+  );
+}
 
 function Labeled({ label, children }: { label: string; children: ReactNode }) {
   return (

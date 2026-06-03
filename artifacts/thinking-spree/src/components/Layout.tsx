@@ -181,12 +181,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
       {/* User card — gold avatar disc + sign-out icon. */}
       <div className="border-t border-sidebar-border p-3">
         <div className="flex items-center gap-3 rounded-md bg-sidebar-accent/50 px-3 py-2.5">
-          <div
-            className="flex h-9 w-9 items-center justify-center rounded-full font-serif text-sm shrink-0"
-            style={{ background: "var(--gold)", color: "hsl(222 38% 15%)" }}
-          >
-            {initials || "U"}
-          </div>
+          {(user as any)?.avatarUrl ? (
+            <img
+              src={(user as any).avatarUrl}
+              alt={user?.name ?? "Profile photo"}
+              className="h-9 w-9 rounded-full object-cover shrink-0 ring-1 ring-white/20"
+            />
+          ) : (
+            <div
+              className="flex h-9 w-9 items-center justify-center rounded-full font-serif text-sm shrink-0"
+              style={{ background: "var(--gold)", color: "hsl(222 38% 15%)" }}
+            >
+              {initials || "U"}
+            </div>
+          )}
           <div className="min-w-0 flex-1 leading-tight">
             <p className="text-sm font-medium truncate text-white">{user?.name ?? "Consultant"}</p>
             <p className="text-[11px] truncate text-sidebar-foreground/60">{user?.role ?? "Consultant"}</p>

@@ -29,8 +29,7 @@ function toneInstruction(tone: string): string {
   }
 }
 
-async function enrichSprint(sprint: typeof sprintsTable.$inferSelect) {
-  const [founder] = await db.select().from(foundersTable).where(eq(foundersTable.id, sprint.founderId)).limit(1);
+function mapSprint(sprint: typeof sprintsTable.$inferSelect, founder?: typeof foundersTable.$inferSelect) {
   return {
     id: sprint.id,
     founderId: sprint.founderId,
@@ -75,6 +74,12 @@ async function enrichSprint(sprint: typeof sprintsTable.$inferSelect) {
   };
 }
 
+/** Single-row enrich (fetches the founder). Used by create/update/read-one. */
+async function enrichSprint(sprint: typeof sprintsTable.$inferSelect) {
+  const [founder] = await db.select().from(foundersTable).where(eq(foundersTable.id, sprint.founderId)).limit(1);
+  return mapSprint(sprint, founder);
+}
+
 /**
  * Builds the scope predicate so a consultant only sees sprints aligned to them.
  * "Aligned" = current user appears as consultant, host, or co-host.
@@ -108,7 +113,16 @@ router.get("/sprints", async (req, res) => {
       .from(sprintsTable)
       .where(scope ?? undefined)
       .orderBy(desc(sprintsTable.scheduledDate), desc(sprintsTable.createdAt));
-    const enriched = await Promise.all(sprints.map(enrichSprint));
+
+    // Batch-load every referenced founder in ONE query, then map in memory.
+    // (Previously this enriched per-row, firing one founder query per sprint —
+    // thousands of round-trips on the team-wide `scope=all` view.)
+    const founderIds = [...new Set(sprints.map(s => s.founderId))];
+    const founders = founderIds.length
+      ? await db.select().from(foundersTable).where(inArray(foundersTable.id, founderIds))
+      : [];
+    const founderById = new Map(founders.map(f => [f.id, f]));
+    const enriched = sprints.map(s => mapSprint(s, founderById.get(s.founderId)));
     res.json(enriched);
   } catch (err) {
     req.log.error({ err }, "Error listing sprints");

@@ -62,6 +62,32 @@ router.get("/auth/me", async (req, res) => {
   }
 });
 
+// ─── Set / clear profile photo ────────────────────────────────────────────
+// Accepts an image data URL (png/jpeg/webp) in the body, or null to clear.
+// The client downscales the image first, so we store a small data URL right in
+// users.avatar_url (no object storage needed).
+router.post("/auth/me/avatar", async (req, res) => {
+  const userId = req.session?.userId;
+  if (!userId) { res.status(401).json({ error: "Not authenticated" }); return; }
+  const dataUrl = req.body?.dataUrl ?? null;
+  if (dataUrl !== null && (typeof dataUrl !== "string" || !/^data:image\/(png|jpe?g|webp);base64,/i.test(dataUrl))) {
+    res.status(400).json({ error: "Provide a PNG/JPEG/WebP image, or null to remove." });
+    return;
+  }
+  if (typeof dataUrl === "string" && dataUrl.length > 900_000) {
+    res.status(413).json({ error: "Image is too large — please choose a smaller photo." });
+    return;
+  }
+  try {
+    const [user] = await db.update(usersTable).set({ avatarUrl: dataUrl }).where(eq(usersTable.id, userId)).returning();
+    if (!user) { res.status(401).json({ error: "User not found" }); return; }
+    res.json(userPayload(user));
+  } catch (err) {
+    req.log.error({ err }, "Failed to update avatar");
+    res.status(500).json({ error: "Failed to update avatar" });
+  }
+});
+
 // ─── /auth/login (email + password) ───────────────────────────────────────
 router.post("/auth/login", async (req, res) => {
   const { email, password } = req.body as { email: string; password: string };

@@ -33,7 +33,7 @@ const SERVICE_META = {
 } as const;
 
 export default function SettingsPage() {
-  const { data: user } = useGetMe();
+  const { data: user, refetch: refetchMe } = useGetMe();
   const { toast } = useToast();
   const [status, setStatus] = useState<GoogleStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
@@ -41,6 +41,59 @@ export default function SettingsPage() {
   const [testing, setTesting] = useState(false);
   const [testResults, setTestResults] = useState<TestResults | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [photoSaving, setPhotoSaving] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const avatarUrl = (user as any)?.avatarUrl as string | null | undefined;
+
+  // Downscale the chosen image to a small square-ish JPEG data URL so it fits
+  // comfortably in the users.avatar_url column (no object storage needed).
+  async function resizeToDataUrl(file: File, max = 256): Promise<string> {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas not supported");
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  }
+
+  async function uploadPhoto(file: File) {
+    if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) {
+      toast({ title: "Unsupported file", description: "Use a JPEG, PNG, or WebP image. (PDFs aren't supported for photos — export it as an image first.)", variant: "destructive" });
+      return;
+    }
+    setPhotoSaving(true);
+    try {
+      const dataUrl = await resizeToDataUrl(file);
+      const res = await fetch(`${BASE}/api/auth/me/avatar`, {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataUrl }),
+      });
+      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || "Upload failed");
+      await refetchMe();
+      toast({ title: "Photo updated" });
+    } catch (e: any) {
+      toast({ title: "Couldn't update photo", description: e.message, variant: "destructive" });
+    } finally { setPhotoSaving(false); }
+  }
+
+  async function removePhoto() {
+    setPhotoSaving(true);
+    try {
+      const res = await fetch(`${BASE}/api/auth/me/avatar`, {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataUrl: null }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      await refetchMe();
+      toast({ title: "Photo removed" });
+    } catch {
+      toast({ title: "Couldn't remove photo", variant: "destructive" });
+    } finally { setPhotoSaving(false); }
+  }
 
   async function fetchStatus() {
     setStatusLoading(true);
@@ -134,12 +187,37 @@ export default function SettingsPage() {
               <h2 className="font-semibold text-foreground">Profile</h2>
             </div>
             <div className="flex items-center gap-4 mb-5">
-              <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-2xl font-bold">
-                {user?.name?.charAt(0).toUpperCase() ?? "U"}
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) uploadPhoto(f); }}
+                className={`relative group w-16 h-16 rounded-full overflow-hidden flex items-center justify-center shrink-0 ${dragOver ? "ring-2 ring-primary ring-offset-2 ring-offset-card" : ""}`}
+                style={avatarUrl ? undefined : { background: "hsl(var(--primary))" }}
+                title="Drop a photo here or click to upload"
+              >
+                {avatarUrl ? (
+                  <img src={avatarUrl} alt={user?.name ?? "Profile"} className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-primary-foreground text-2xl font-bold">{user?.name?.charAt(0).toUpperCase() ?? "U"}</span>
+                )}
+                <label className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover:opacity-100 cursor-pointer transition-opacity">
+                  {photoSaving ? <Loader2 size={16} className="animate-spin text-white" /> : <Upload size={16} className="text-white" />}
+                  <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadPhoto(f); e.currentTarget.value = ""; }} />
+                </label>
               </div>
               <div>
                 <p data-testid="text-username" className="font-semibold text-foreground text-lg">{user?.name ?? "—"}</p>
                 <p data-testid="text-role" className="text-sm text-muted-foreground capitalize">{user?.role ?? "Consultant"}</p>
+                <div className="mt-1.5 flex items-center gap-3">
+                  <label className="text-xs font-medium text-primary hover:underline cursor-pointer">
+                    {avatarUrl ? "Change photo" : "Upload photo"}
+                    <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadPhoto(f); e.currentTarget.value = ""; }} />
+                  </label>
+                  {avatarUrl && <button onClick={removePhoto} disabled={photoSaving} className="text-xs text-muted-foreground hover:text-destructive">Remove</button>}
+                </div>
+                <p className="mt-1 text-[11px] text-muted-foreground">Drag &amp; drop a JPEG or PNG onto the circle, or click it. Auto-resized.</p>
               </div>
             </div>
             <div className="space-y-3">
