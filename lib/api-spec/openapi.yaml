@@ -1,0 +1,1401 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: Thinking Spree consultant platform API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Authentication operations
+  - name: incubators
+    description: Incubator management
+  - name: founders
+    description: Founder/startup management
+  - name: sprints
+    description: T-Sprint session management
+  - name: emails
+    description: Email generation and sending
+  - name: calendar
+    description: Calendar operations
+  - name: summary
+    description: Summary sheet operations
+  - name: google
+    description: Google OAuth + service integrations (Calendar, Gmail, Drive, Sheets)
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current authenticated user
+      responses:
+        "200":
+          description: Current user info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Not authenticated
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Logout current user
+      responses:
+        "200":
+          description: Logged out
+
+  /incubators:
+    get:
+      operationId: listIncubators
+      tags: [incubators]
+      summary: List all incubators
+      responses:
+        "200":
+          description: List of incubators with their ventures
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Incubator"
+    post:
+      operationId: createIncubator
+      tags: [incubators]
+      summary: Create a new incubator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncubatorInput"
+      responses:
+        "201":
+          description: Created incubator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incubator"
+
+  /incubators/{id}:
+    get:
+      operationId: getIncubator
+      tags: [incubators]
+      summary: Get a specific incubator with its ventures and sprints
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Incubator details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncubatorDetail"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateIncubator
+      tags: [incubators]
+      summary: Update an incubator
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncubatorInput"
+      responses:
+        "200":
+          description: Updated incubator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incubator"
+    delete:
+      operationId: deleteIncubator
+      tags: [incubators]
+      summary: Delete an incubator
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /founders:
+    get:
+      operationId: listFounders
+      tags: [founders]
+      summary: List all founders/startups
+      responses:
+        "200":
+          description: List of founders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Founder"
+    post:
+      operationId: createFounder
+      tags: [founders]
+      summary: Create a new founder/startup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FounderInput"
+      responses:
+        "201":
+          description: Created founder
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Founder"
+
+  /founders/{id}:
+    get:
+      operationId: getFounder
+      tags: [founders]
+      summary: Get a specific founder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Founder details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Founder"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateFounder
+      tags: [founders]
+      summary: Update a founder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FounderUpdate"
+      responses:
+        "200":
+          description: Updated founder
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Founder"
+    delete:
+      operationId: deleteFounder
+      tags: [founders]
+      summary: Delete a founder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /sprints:
+    get:
+      operationId: listSprints
+      tags: [sprints]
+      summary: List T-Sprint sessions (scoped to caller by default)
+      description: >
+        Default (scope=mine) returns only sprints aligned to the caller —
+        as consultant, host, or co-host. Pass scope=all to get the team-wide
+        register used by the Sprint Tracking page.
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [mine, all]
+            default: mine
+      responses:
+        "200":
+          description: List of sprints
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Sprint"
+    post:
+      operationId: createSprint
+      tags: [sprints]
+      summary: Create a new T-Sprint session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SprintInput"
+      responses:
+        "201":
+          description: Created sprint
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sprint"
+
+  /sprints/{id}:
+    get:
+      operationId: getSprint
+      tags: [sprints]
+      summary: Get a specific T-Sprint
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Sprint details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sprint"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateSprint
+      tags: [sprints]
+      summary: Update a T-Sprint
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SprintUpdate"
+      responses:
+        "200":
+          description: Updated sprint
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sprint"
+    delete:
+      operationId: deleteSprint
+      tags: [sprints]
+      summary: Delete a sprint
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /sprints/{id}/pre-email:
+    post:
+      operationId: generatePreEmail
+      tags: [emails]
+      summary: Generate a pre-sprint invitation email (AI-powered)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailGenerateInput"
+      responses:
+        "200":
+          description: Generated pre-sprint email
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailDraft"
+
+  /sprints/{id}/post-email:
+    post:
+      operationId: generatePostEmail
+      tags: [emails]
+      summary: Generate a post-sprint analysis email (AI-powered)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailGenerateInput"
+      responses:
+        "200":
+          description: Generated post-sprint email
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailDraft"
+
+  /emails/send:
+    post:
+      operationId: sendEmail
+      tags: [emails]
+      summary: Send an email after human review/approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailSendInput"
+      responses:
+        "200":
+          description: Email sent result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailSendResult"
+
+  /calendar/events:
+    get:
+      operationId: getCalendarEvents
+      tags: [calendar]
+      summary: Get the consultant's calendar events
+      description: >
+        By default returns today's events only. Pass ?days=7 to get a week-long
+        window (used by the Dashboard for "Upcoming this week"). Capped at 30.
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 30
+            default: 1
+      responses:
+        "200":
+          description: List of calendar events in the requested window
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CalendarEvent"
+
+  /summary:
+    get:
+      operationId: getSummarySheet
+      tags: [summary]
+      summary: Get the summary of all T-Sprints
+      responses:
+        "200":
+          description: T-Sprint summary records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SummaryRecord"
+
+  /stats/overview:
+    get:
+      operationId: getStatsOverview
+      tags: [summary]
+      summary: Get dashboard stats overview
+      responses:
+        "200":
+          description: Stats overview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsOverview"
+
+  /google/status:
+    get:
+      operationId: getGoogleStatus
+      tags: [google]
+      summary: Returns OAuth configuration + per-service connection status for the current user
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoogleStatus"
+
+  /google/oauth/start:
+    get:
+      operationId: startGoogleOAuth
+      tags: [google]
+      summary: Returns a redirect URL to begin Google OAuth
+      parameters:
+        - name: services
+          in: query
+          required: false
+          schema: { type: string, description: "Comma-sep list: calendar,gmail,drive,sheets" }
+      responses:
+        "200":
+          description: Auth URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+                required: [url]
+
+  /google/oauth/callback:
+    get:
+      operationId: googleOAuthCallback
+      tags: [google]
+      summary: OAuth callback — exchanges the ?code= for tokens and redirects back to the app
+      parameters:
+        - { name: code,  in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses:
+        "302": { description: Redirect to /settings with success/error flag }
+
+  /google/disconnect:
+    post:
+      operationId: disconnectGoogle
+      tags: [google]
+      summary: Revoke this user's Google tokens
+      responses:
+        "200":
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean } }
+
+  /google/test:
+    post:
+      operationId: testGoogleConnections
+      tags: [google]
+      summary: Runs a cheap read against each connected Google service and returns per-service results
+      responses:
+        "200":
+          description: Test results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoogleTestResults"
+
+  /auth/login:
+    post:
+      operationId: loginUser
+      tags: [auth]
+      summary: Sign in with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Invalid credentials
+
+  /auth/signup:
+    post:
+      operationId: signupUser
+      tags: [auth]
+      summary: Create a new consultant account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                name: { type: string }
+      responses:
+        "201":
+          description: Account created and logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+
+  /auth/google/start:
+    get:
+      operationId: startGoogleSignIn
+      tags: [auth]
+      summary: Returns a URL to begin Google sign-in (and integrations grant)
+      responses:
+        "200":
+          description: Auth URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+                required: [url]
+
+  /auth/users:
+    get:
+      operationId: listUsers
+      tags: [auth]
+      summary: (Admin only) List all users
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "403":
+          description: Not an admin
+
+  /auth/users/{id}/role:
+    patch:
+      operationId: updateUserRole
+      tags: [auth]
+      summary: (Admin only) Promote/demote a user
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [admin, consultant]
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+
+  /admin/reseed:
+    post:
+      operationId: reseedFromBakedXlsx
+      tags: [admin]
+      summary: (Admin only) Re-run the baked-in seed files (idempotent / append-only)
+      description: >
+        Re-imports the xlsx files shipped in scripts/seed-data/ (ISB / JU / Sheet
+        Tracking). Use this when a tab unexpectedly looks empty after deploy.
+        Safe to run anytime — the importer is append-only and never overwrites
+        filled fields or creates duplicate sprint rows.
+      responses:
+        "200":
+          description: Re-seed counts per file
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:       { type: boolean }
+                  dataDir:  { type: string }
+                  isb:
+                    type: object
+                    properties:
+                      imported: { type: integer }
+                      skipped:  { type: integer }
+                  ju:
+                    type: object
+                    properties:
+                      imported: { type: integer }
+                      skipped:  { type: integer }
+                  tracking:
+                    type: object
+                    properties:
+                      imported: { type: integer }
+                      skipped:  { type: integer }
+                      existing: { type: integer }
+
+  /ai/sheet-emails:
+    post:
+      operationId: aiSheetEmails
+      tags: [emails, ai]
+      summary: Generate pre-sprint AND post-sprint email drafts from a Google Sheet link
+      description: >
+        Reads the linked Google Sheet (using the consultant's Sheets scope) and
+        produces both a pre-sprint invitation and a post-sprint summary email.
+        The consultant edits before sending — nothing auto-sends.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sheetUrl]
+              properties:
+                sheetUrl: { type: string, description: "Google Sheet URL or bare spreadsheet ID" }
+                sprintId: { type: integer, nullable: true, description: "Optional — enriches the prompt with sprint context" }
+                tone:
+                  type: string
+                  enum: [professional, friendly, formal, concise]
+                  default: professional
+      responses:
+        "200":
+          description: Two drafts ready for review
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pre:  { $ref: "#/components/schemas/EmailDraft" }
+                  post: { $ref: "#/components/schemas/EmailDraft" }
+                  sheetPreview: { type: string, description: "First ~600 chars of the sheet content the AI read — useful for debugging" }
+
+  /ai/sprints/{id}/summary-update:
+    post:
+      operationId: aiSummaryUpdate
+      tags: [emails, ai]
+      summary: Propose AI-generated patches to the founder's Summary Sheet fields
+      description: >
+        Reads either a Google Sheet (via Sheets scope) or pasted raw notes and
+        proposes a per-field patch to the founder's summary. Returns the current
+        values + the proposed changes — nothing is applied automatically. The
+        consultant applies via PATCH /founders/:id.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sheetUrl: { type: string, nullable: true }
+                notes:    { type: string, nullable: true }
+              description: "Supply at least one of sheetUrl or notes"
+      responses:
+        "200":
+          description: Proposed updates (review before applying)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  founderId:    { type: integer }
+                  sprintId:     { type: integer }
+                  current:      { type: object, additionalProperties: true }
+                  proposed:     { type: object, additionalProperties: true }
+                  changedKeys:  { type: array, items: { type: string } }
+
+  /admin/import:
+    post:
+      operationId: importSheet
+      tags: [admin]
+      summary: (Admin only) Upload an xlsx file (ISB summary / JU summary / Sheet Tracking)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                kind:
+                  type: string
+                  enum: [auto, isb-summary, ju-summary, sheet-tracking]
+                  default: auto
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kind:     { type: string }
+                  fileName: { type: string }
+                  result:
+                    type: object
+                    properties:
+                      imported: { type: integer }
+                      skipped:  { type: integer }
+                      existing: { type: integer }
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        avatarUrl:
+          type: ["string", "null"]
+        isAdmin:
+          type: boolean
+        hasGoogleAccount:
+          type: boolean
+      required:
+        - id
+        - email
+        - name
+        - role
+
+    Incubator:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+        sheetUrl:
+          type: ["string", "null"]
+        description:
+          type: ["string", "null"]
+        ventureCount:
+          type: integer
+        sprintCount:
+          type: integer
+        createdAt:
+          type: string
+      required:
+        - id
+        - name
+        - type
+        - ventureCount
+        - sprintCount
+        - createdAt
+
+    IncubatorInput:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        sheetUrl:
+          type: string
+        description:
+          type: string
+      required:
+        - name
+
+    VentureSprint:
+      type: object
+      properties:
+        id:               { type: integer }
+        scheduledDate:    { type: string }
+        scheduledTime:    { type: ["string", "null"] }
+        status:           { type: string }
+        consultantName:   { type: string }
+        sprintHost:       { type: ["string", "null"] }
+        coHost:           { type: ["string", "null"] }
+        sprintNumber:     { type: ["integer", "null"] }
+        sessionType:      { type: ["string", "null"] }
+        tsheetUrl:        { type: ["string", "null"] }
+        fathomUrl:        { type: ["string", "null"] }
+        strengths:        { type: ["string", "null"] }
+        gaps:             { type: ["string", "null"] }
+        nextGoal:         { type: ["string", "null"] }
+        actionableSteps:  { type: ["string", "null"] }
+        preEmailSentAt:   { type: ["string", "null"] }
+        postEmailSentAt:  { type: ["string", "null"] }
+      required:
+        - id
+        - scheduledDate
+        - status
+        - consultantName
+
+    IncubatorVenture:
+      type: object
+      properties:
+        id:                       { type: integer }
+        name:                     { type: string }
+        companyName:              { type: string }
+        email:                    { type: string }
+        contact:                  { type: ["string", "null"] }
+        sector:                   { type: ["string", "null"] }
+        industry:                 { type: ["string", "null"] }
+        stage:                    { type: ["string", "null"] }
+        description:              { type: ["string", "null"] }
+        partnerName:              { type: ["string", "null"] }
+        # Summary-sheet fields
+        goalSetting:              { type: ["string", "null"] }
+        revenueLast12Months:      { type: ["string", "null"] }
+        revenueLastMonthMrr:      { type: ["string", "null"] }
+        teamSize:                 { type: ["integer", "null"] }
+        keyStrength:              { type: ["string", "null"] }
+        gap:                      { type: ["string", "null"] }
+        conceptAndSessions:       { type: ["string", "null"] }
+        mentorRecommendation:     { type: ["string", "null"] }
+        marketAccess:             { type: ["string", "null"] }
+        idealCustomerList:        { type: ["string", "null"] }
+        observationsTs:           { type: ["string", "null"] }
+        recommendationForVc:      { type: ["string", "null"] }
+        previousFundraiseInr:     { type: ["string", "number", "null"] }
+        previousFundraiseOrgs:    { type: ["string", "null"] }
+        currentBurn:              { type: ["string", "null"] }
+        fundAskCr:                { type: ["string", "number", "null"] }
+        fundraiseCommitments:     { type: ["string", "null"] }
+        fundraiseNotes:           { type: ["string", "null"] }
+        fathomLink:               { type: ["string", "null"] }
+        currentProblem:           { type: ["string", "null"] }
+        suggestedNextStep:        { type: ["string", "null"] }
+        nextFiveSprints:          { type: ["string", "null"] }
+        caseStudyWorthy:          { type: ["boolean", "null"] }
+        caseStudyTheme:           { type: ["string", "null"] }
+        trainingWorthy:           { type: ["boolean", "null"] }
+        trainingTheme:            { type: ["string", "null"] }
+        level:                    { type: ["string", "null"] }
+        tSprintIntervention:      { type: ["string", "null"] }
+        tasks:                    { type: ["string", "null"] }
+        # Counts
+        sprintCount:              { type: integer }
+        lastSprintDate:           { type: ["string", "null"] }
+        lastSprintStatus:         { type: ["string", "null"] }
+        completedSprints:         { type: integer }
+        sprints:
+          type: array
+          items:
+            $ref: "#/components/schemas/VentureSprint"
+      required:
+        - id
+        - name
+        - companyName
+        - email
+        - sprintCount
+        - completedSprints
+        - sprints
+
+    IncubatorDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+        sheetUrl:
+          type: ["string", "null"]
+        description:
+          type: ["string", "null"]
+        ventures:
+          type: array
+          items:
+            $ref: "#/components/schemas/IncubatorVenture"
+        createdAt:
+          type: string
+      required:
+        - id
+        - name
+        - type
+        - ventures
+        - createdAt
+
+    Founder:
+      type: object
+      properties:
+        id:
+          type: integer
+        incubatorId:
+          type: ["integer", "null"]
+        name:
+          type: string
+        email:
+          type: string
+        companyName:
+          type: string
+        sector:
+          type: ["string", "null"]
+        stage:
+          type: ["string", "null"]
+        description:
+          type: ["string", "null"]
+        acceleratorProgram:
+          type: ["string", "null"]
+        thinkingSheetUrl:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+      required:
+        - id
+        - name
+        - email
+        - companyName
+        - createdAt
+
+    FounderInput:
+      type: object
+      properties:
+        incubatorId:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        companyName:
+          type: string
+        sector:
+          type: string
+        stage:
+          type: string
+        description:
+          type: string
+        acceleratorProgram:
+          type: string
+        thinkingSheetUrl:
+          type: string
+      required:
+        - name
+        - email
+        - companyName
+
+    FounderUpdate:
+      type: object
+      properties:
+        incubatorId:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        companyName:
+          type: string
+        sector:
+          type: string
+        stage:
+          type: string
+        description:
+          type: string
+        acceleratorProgram:
+          type: string
+        thinkingSheetUrl:
+          type: string
+
+    Sprint:
+      type: object
+      properties:
+        id:
+          type: integer
+        founderId:
+          type: integer
+        founderName:
+          type: string
+        companyName:
+          type: string
+        industry:
+          type: ["string", "null"]
+        stage:
+          type: ["string", "null"]
+        programName:
+          type: ["string", "null"]
+        partnerName:
+          type: ["string", "null"]
+        scheduledDate:
+          type: string
+        scheduledTime:
+          type: ["string", "null"]
+        endTime:
+          type: ["string", "null"]
+        totalDuration:
+          type: ["string", "null"]
+        consultantName:
+          type: string
+        sprintHost:
+          type: ["string", "null"]
+        coHost:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [scheduled, completed, cancelled]
+        tsheetUrl:
+          type: ["string", "null"]
+        fathomUrl:
+          type: ["string", "null"]
+        sprintNumber:
+          type: ["integer", "null"]
+        sessionType:
+          type: ["string", "null"]
+        paymentStatus:
+          type: ["string", "null"]
+        billedTo:
+          type: ["string", "null"]
+        billNumber:
+          type: ["string", "null"]
+        price:
+          type: ["string", "number", "null"]
+        week:
+          type: ["integer", "null"]
+        month:
+          type: ["integer", "null"]
+        cyYear:
+          type: ["integer", "null"]
+        fyYear:
+          type: ["integer", "null"]
+        quarter:
+          type: ["string", "null"]
+        strengths:
+          type: ["string", "null"]
+        gaps:
+          type: ["string", "null"]
+        swotAnalysis:
+          type: ["string", "null"]
+        nextGoal:
+          type: ["string", "null"]
+        actionableSteps:
+          type: ["string", "null"]
+        mentorshipRecommendation:
+          type: ["string", "null"]
+        marketConnections:
+          type: ["string", "null"]
+        meetLink:
+          type: ["string", "null"]
+        preEmailSentAt:
+          type: ["string", "null"]
+        postEmailSentAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+      required:
+        - id
+        - founderId
+        - founderName
+        - companyName
+        - scheduledDate
+        - consultantName
+        - status
+        - createdAt
+
+    SprintInput:
+      type: object
+      properties:
+        founderId:        { type: integer }
+        scheduledDate:    { type: string }
+        scheduledTime:    { type: string }
+        endTime:          { type: string }
+        consultantName:   { type: string }
+        sprintHost:       { type: string }
+        coHost:           { type: string }
+        meetLink:         { type: string }
+        tsheetUrl:        { type: string }
+        fathomUrl:        { type: string }
+        sprintNumber:     { type: integer }
+        sessionType:      { type: string }
+        paymentStatus:    { type: string }
+        billedTo:         { type: string }
+        billNumber:       { type: string }
+        price:            { type: number }
+      required:
+        - founderId
+        - scheduledDate
+        - consultantName
+
+    SprintUpdate:
+      type: object
+      properties:
+        scheduledDate:
+          type: string
+        scheduledTime:
+          type: string
+        consultantName:
+          type: string
+        status:
+          type: string
+          enum: [scheduled, completed, cancelled]
+        tsheetUrl:
+          type: string
+        fathomUrl:
+          type: string
+        sprintNumber:
+          type: integer
+        sessionType:
+          type: string
+        strengths:
+          type: string
+        gaps:
+          type: string
+        swotAnalysis:
+          type: string
+        nextGoal:
+          type: string
+        actionableSteps:
+          type: string
+        mentorshipRecommendation:
+          type: string
+        marketConnections:
+          type: string
+        meetLink:
+          type: string
+
+    EmailGenerateInput:
+      type: object
+      properties:
+        tone:
+          type: string
+          enum: [professional, friendly, concise, formal]
+          default: professional
+
+    EmailDraft:
+      type: object
+      properties:
+        subject:
+          type: string
+        body:
+          type: string
+        to:
+          type: string
+        toName:
+          type: string
+        sprintId:
+          type: integer
+        emailType:
+          type: string
+          enum: [pre_sprint, post_sprint]
+      required:
+        - subject
+        - body
+        - to
+        - toName
+        - sprintId
+        - emailType
+
+    EmailSendInput:
+      type: object
+      properties:
+        to:
+          type: string
+        subject:
+          type: string
+        body:
+          type: string
+        sprintId:
+          type: integer
+        emailType:
+          type: string
+          enum: [pre_sprint, post_sprint]
+      required:
+        - to
+        - subject
+        - body
+        - sprintId
+        - emailType
+
+    EmailSendResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        messageId:
+          type: ["string", "null"]
+        sentAt:
+          type: string
+      required:
+        - success
+        - sentAt
+
+    CalendarEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        startTime:
+          type: string
+        endTime:
+          type: string
+        location:
+          type: ["string", "null"]
+        description:
+          type: ["string", "null"]
+        meetLink:
+          type: ["string", "null"]
+        attendees:
+          type: array
+          items:
+            type: string
+        isAllDay:
+          type: boolean
+      required:
+        - id
+        - title
+        - startTime
+        - endTime
+        - isAllDay
+
+    SummaryRecord:
+      type: object
+      properties:
+        id:
+          type: integer
+        sprintId:
+          type: integer
+        founderName:
+          type: string
+        companyName:
+          type: string
+        sprintDate:
+          type: string
+        consultantName:
+          type: string
+        strengths:
+          type: ["string", "null"]
+        gaps:
+          type: ["string", "null"]
+        nextGoal:
+          type: ["string", "null"]
+        preEmailSentAt:
+          type: ["string", "null"]
+        postEmailSentAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - sprintId
+        - founderName
+        - companyName
+        - sprintDate
+        - consultantName
+
+    StatsOverview:
+      type: object
+      properties:
+        totalSprints:
+          type: integer
+        scheduledSprints:
+          type: integer
+        completedSprints:
+          type: integer
+        totalFounders:
+          type: integer
+        emailsSentThisMonth:
+          type: integer
+        upcomingThisWeek:
+          type: integer
+      required:
+        - totalSprints
+        - scheduledSprints
+        - completedSprints
+        - totalFounders
+        - emailsSentThisMonth
+        - upcomingThisWeek
+
+    GoogleStatus:
+      type: object
+      properties:
+        configured:  { type: boolean }
+        connected:   { type: boolean }
+        googleEmail: { type: ["string", "null"] }
+        scope:       { type: ["string", "null"] }
+        expiresAt:   { type: ["string", "null"] }
+        services:
+          type: object
+          properties:
+            calendar: { type: boolean }
+            gmail:    { type: boolean }
+            drive:    { type: boolean }
+            sheets:   { type: boolean }
+          required: [calendar, gmail, drive, sheets]
+      required: [configured, connected, services]
+
+    GoogleTestResults:
+      type: object
+      properties:
+        ranAt: { type: string }
+        results:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              ok:     { type: boolean }
+              detail: { type: string }
+              error:  { type: string }
+            required: [ok]
+      required: [ranAt, results]
