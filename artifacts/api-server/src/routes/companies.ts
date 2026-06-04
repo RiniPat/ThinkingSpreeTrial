@@ -385,6 +385,33 @@ router.post("/companies/:id/resync", async (req, res) => {
  * without round-tripping through the upload flow.
  */
 /**
+ * Lightweight contact directory for recipient autocomplete in the email
+ * composer (Gmail-style suggestions). Returns distinct founder contacts with a
+ * real email address.
+ */
+router.get("/contacts", async (req, res) => {
+  const userId = await requireUser(req, res); if (!userId) return;
+  try {
+    const rows = await db
+      .select({ name: foundersTable.name, email: foundersTable.email, company: foundersTable.companyName })
+      .from(foundersTable);
+    const seen = new Set<string>();
+    const contacts: { name: string; email: string; company: string | null }[] = [];
+    for (const r of rows) {
+      const email = (r.email ?? "").trim().toLowerCase();
+      if (!email || email.includes("@placeholder.local") || seen.has(email)) continue;
+      seen.add(email);
+      contacts.push({ name: r.name ?? "", email: r.email!, company: r.company ?? null });
+    }
+    contacts.sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
+    res.json({ contacts });
+  } catch (err) {
+    req.log.error({ err }, "Failed to load contacts");
+    res.status(500).json({ error: "Failed to load contacts" });
+  }
+});
+
+/**
  * Manually create a startup/company (admin add, spreadsheet-style).
  * Body: { companyName (required), founderName?, founderEmail?, stage?,
  *         industry?, cohortName? }

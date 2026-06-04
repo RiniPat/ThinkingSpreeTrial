@@ -2,16 +2,23 @@
  * Email Composer dialog used by the Company detail page.
  *
  * Flow:
- *   1. Opens with kind="pre" or "post"; immediately POSTs /generate-email
- *      so the consultant sees a draft as soon as the modal opens.
- *   2. Consultant can edit subject + body. Can also tweak "Additional notes"
- *      and click Regenerate to re-prompt Gemini.
- *   3. Three actions: Send via Gmail, Save Draft (no send), Copy to clipboard.
- *   4. On send, parent gets notified so it can refresh the timeline.
+ *   1. Opens with kind="pre" or "post". If a draft was saved earlier (per
+ *      company+kind), it's restored; otherwise it POSTs /generate-email so the
+ *      consultant sees a Gemini draft immediately.
+ *   2. Consultant edits To / Cc / subject / body. The draft is auto-saved to
+ *      localStorage on every change, so switching browser tabs / navigating away
+ *      and returning never loses work. The saved draft is cleared after a send.
+ *   3. Recipients can be imported from a Google Calendar event (pulls the
+ *      event's attendees) and the To / Cc fields suggest contacts as you type,
+ *      Gmail-style.
+ *   4. Actions: Send via Gmail, Save Draft, Copy.
  */
-import { useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Send, Save, Copy, Sparkles, X, AlertCircle, CheckCircle2, Mail } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Loader2, Send, Save, Copy, Sparkles, X, AlertCircle, CheckCircle2, Mail,
+  CalendarDays, RotateCcw, ChevronDown,
+} from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -40,6 +47,71 @@ type GenerateResponse = {
   };
 };
 
+type Contact = { name: string; email: string; company: string | null };
+type CalEvent = { id: string; title: string; startTime: string; endTime: string; attendees: string[] };
+
+function tokens(value: string): string[] {
+  return value.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+}
+
+/** A recipient input with Gmail-style contact suggestions on the current token. */
+function RecipientField({
+  value, onChange, contacts, placeholder,
+}: { value: string; onChange: (v: string) => void; contacts: Contact[]; placeholder?: string }) {
+  const [open, setOpen] = useState(false);
+  const lastToken = (value.split(/[,;]/).pop() ?? "").trim().toLowerCase();
+  const chosen = new Set(tokens(value).map(s => s.toLowerCase()));
+  const suggestions = lastToken.length >= 1
+    ? contacts
+        .filter(c =>
+          !chosen.has(c.email.toLowerCase()) &&
+          (c.email.toLowerCase().includes(lastToken) ||
+           c.name.toLowerCase().includes(lastToken) ||
+           (c.company ?? "").toLowerCase().includes(lastToken)))
+        .slice(0, 6)
+    : [];
+
+  function pick(email: string) {
+    const idx = Math.max(value.lastIndexOf(","), value.lastIndexOf(";"));
+    const head = idx >= 0 ? value.slice(0, idx + 1) + " " : "";
+    onChange(head + email + ", ");
+    setOpen(true);
+  }
+
+  return (
+    <div className="relative">
+      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={placeholder}
+        className="w-full pl-9 pr-4 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring"
+      />
+      {open && suggestions.length > 0 && (
+        <ul className="absolute left-0 right-0 z-30 mt-1 max-h-56 overflow-auto rounded-md border border-border bg-card shadow-lg">
+          {suggestions.map(c => (
+            <li key={c.email}>
+              <button
+                type="button"
+                onMouseDown={(e) => { e.preventDefault(); pick(c.email); }}
+                className="w-full text-left px-3 py-2 hover:bg-muted flex flex-col"
+              >
+                <span className="text-sm text-foreground">
+                  {c.name || c.email}{c.company ? <span className="text-muted-foreground"> · {c.company}</span> : null}
+                </span>
+                <span className="text-[11px] text-muted-foreground">{c.email}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function EmailComposer({
   companyId, open, kind, founderEmail, founderName, companyName, onClose, onSent,
 }: Props) {
@@ -52,6 +124,30 @@ export function EmailComposer({
   const [extraNotes, setExtraNotes] = useState("");
   const [draftId, setDraftId] = useState<number | null>(null);
   const [sprintInfo, setSprintInfo] = useState<{ date: string | null; time: string | null }>({ date: null, time: null });
+  const [restored, setRestored] = useState(false);
+  const [showCal, setShowCal] = useState(false);
+
+  const draftKey = `emailDraft:${companyId}:${kind}`;
+  // When true, the next generate result only updates sprint info (used after we
+  // restore a saved draft and just want the calendar banner, not new text).
+  const skipApplyRef = useRef(false);
+
+  // Contacts for recipient suggestions (loaded once, cached).
+  const { data: contactsData } = useQuery<{ contacts: Contact[] }>({
+    queryKey: ["contacts"],
+    queryFn: () => fetch(`${BASE}/api/contacts`, { credentials: "include" }).then(r => r.ok ? r.json() : { contacts: [] }),
+    staleTime: 5 * 60_000,
+    enabled: open,
+  });
+  const contacts = contactsData?.contacts ?? [];
+
+  // Upcoming calendar events (for importing recipients).
+  const { data: calEvents } = useQuery<CalEvent[]>({
+    queryKey: ["composer-calendar-events"],
+    queryFn: () => fetch(`${BASE}/api/calendar/events?days=14`, { credentials: "include" }).then(r => r.ok ? r.json() : []),
+    staleTime: 60_000,
+    enabled: open,
+  });
 
   // Generate immediately on open. Subsequent regenerations use the same fn.
   const generateMutation = useMutation({
@@ -69,10 +165,17 @@ export function EmailComposer({
       return (await res.json()) as GenerateResponse;
     },
     onSuccess: (data) => {
+      setSprintInfo({ date: data.context.sprintDate, time: data.context.sprintTime });
+      // If we only ran generate to fetch sprint info for a restored draft,
+      // don't overwrite the restored subject/body/draft.
+      if (skipApplyRef.current) {
+        skipApplyRef.current = false;
+        if (data.context.toEmail && !toEmail) setToEmail(data.context.toEmail);
+        return;
+      }
       setSubject(data.subject);
       setBody(data.body);
       setDraftId(data.draftId);
-      setSprintInfo({ date: data.context.sprintDate, time: data.context.sprintTime });
       if (data.context.toEmail && !toEmail) setToEmail(data.context.toEmail);
     },
     onError: (err: any) => {
@@ -96,6 +199,7 @@ export function EmailComposer({
       return res.json();
     },
     onSuccess: (data) => {
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       toast({
         title: "Email sent",
         description: data?.threaded
@@ -131,16 +235,47 @@ export function EmailComposer({
     onError: (err: any) => toast({ title: "Save failed", description: err.message, variant: "destructive" }),
   });
 
-  // Auto-generate when the dialog opens (and clear when it closes).
+  // On open: restore a saved draft if present, otherwise auto-generate.
   useEffect(() => {
-    if (open) {
+    if (!open) return;
+    let didRestore = false;
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (d && (d.subject || d.body || d.toEmail || d.cc)) {
+          setSubject(d.subject ?? "");
+          setBody(d.body ?? "");
+          setToEmail(d.toEmail ?? (founderEmail ?? ""));
+          setCc(d.cc ?? "");
+          setExtraNotes(d.extraNotes ?? "");
+          setDraftId(d.draftId ?? null);
+          didRestore = true;
+        }
+      }
+    } catch { /* ignore */ }
+
+    setRestored(didRestore);
+    if (didRestore) {
+      // Pull sprint info for the banner without overwriting the restored text.
+      skipApplyRef.current = true;
+      generateMutation.mutate(undefined);
+    } else {
       setSubject(""); setBody(""); setDraftId(null); setExtraNotes("");
-      setToEmail(founderEmail ?? "");
-      setCc("");
+      setToEmail(founderEmail ?? ""); setCc("");
+      skipApplyRef.current = false;
       generateMutation.mutate(undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, kind]);
+
+  // Auto-save the draft on every change while open.
+  useEffect(() => {
+    if (!open) return;
+    try {
+      localStorage.setItem(draftKey, JSON.stringify({ subject, body, toEmail, cc, extraNotes, draftId }));
+    } catch { /* ignore */ }
+  }, [open, draftKey, subject, body, toEmail, cc, extraNotes, draftId]);
 
   if (!open) return null;
 
@@ -148,14 +283,28 @@ export function EmailComposer({
   const sending = sendMutation.isPending;
   const saving = saveDraftMutation.isPending;
   const busy = generating || sending || saving;
-  // Split on comma/semicolon, validate each, drop placeholders. At least one
-  // real recipient is required to send.
-  const validRecipients = toEmail
-    .split(/[,;]/)
-    .map(s => s.trim())
-    .filter(s => s.includes("@") && !s.includes("@placeholder.local"));
+
+  const validRecipients = tokens(toEmail).filter(s => s.includes("@") && !s.includes("@placeholder.local"));
   const hasPlaceholder = toEmail.includes("@placeholder.local");
   const canSend = !!subject && !!body && validRecipients.length > 0;
+
+  function importEventRecipients(ev: CalEvent) {
+    const emails = (ev.attendees ?? []).filter(e => e && e.includes("@") && !e.includes("@placeholder.local"));
+    if (emails.length === 0) { toast({ title: "No attendees on that event" }); return; }
+    const merged = Array.from(new Set([...tokens(toEmail), ...emails]));
+    setToEmail(merged.join(", ") + ", ");
+    if (!subject && ev.title) setSubject(kind === "post" ? `Re: ${ev.title}` : ev.title);
+    setShowCal(false);
+    toast({ title: `Added ${emails.length} recipient(s)`, description: `From "${ev.title}"` });
+  }
+
+  // When the restored draft has no AI text yet (regeneration only fills sprint
+  // info), keep the user's restored content. We achieve that by NOT applying
+  // generate results over non-empty restored fields handled in onSuccess via the
+  // `!toEmail` guard for email; for subject/body we simply let regenerate fill
+  // only if the user explicitly clicks Regenerate. To honor restore, skip the
+  // auto-applied subject/body when guard is set:
+  // (handled by clearing guard once the user edits)
 
   return (
     <div
@@ -190,6 +339,23 @@ export function EmailComposer({
 
         {/* Body */}
         <div className="max-h-[calc(100vh-16rem)] overflow-y-auto px-6 py-5 space-y-4">
+          {restored && (
+            <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 flex items-center justify-between gap-2 text-xs text-blue-800 dark:border-blue-900/40 dark:bg-blue-900/20 dark:text-blue-300">
+              <span className="flex items-center gap-2"><Save className="h-3.5 w-3.5" /> Restored your in-progress draft.</span>
+              <button
+                onClick={() => {
+                  try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+                  setRestored(false); setSubject(""); setBody(""); setDraftId(null);
+                  setToEmail(founderEmail ?? ""); setCc(""); setExtraNotes("");
+                  generateMutation.mutate(undefined);
+                }}
+                className="inline-flex items-center gap-1 font-medium underline hover:no-underline"
+              >
+                <RotateCcw className="h-3 w-3" /> Discard & regenerate
+              </button>
+            </div>
+          )}
+
           {/* Sprint date/time info banner (pre only) */}
           {kind === "pre" && (sprintInfo.date || sprintInfo.time) && (
             <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 flex items-center gap-2 text-xs text-emerald-800">
@@ -205,28 +371,55 @@ export function EmailComposer({
             </div>
           )}
 
+          {/* Import recipients from a calendar event */}
+          <div className="rounded-md border border-border">
+            <button
+              type="button"
+              onClick={() => setShowCal(v => !v)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
+            >
+              <span className="flex items-center gap-2"><CalendarDays className="h-3.5 w-3.5 text-primary" /> Import recipients from a calendar event</span>
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showCal ? "rotate-180" : ""}`} />
+            </button>
+            {showCal && (
+              <div className="border-t border-border max-h-48 overflow-auto">
+                {(calEvents ?? []).length === 0 ? (
+                  <p className="px-3 py-3 text-xs text-muted-foreground">No upcoming events found (next 14 days), or Calendar isn't connected.</p>
+                ) : (
+                  <ul className="divide-y divide-border">
+                    {(calEvents ?? []).map(ev => (
+                      <li key={ev.id}>
+                        <button
+                          type="button"
+                          onClick={() => importEventRecipients(ev)}
+                          className="w-full text-left px-3 py-2 hover:bg-muted"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm text-foreground truncate">{ev.title}</span>
+                            <span className="text-[11px] text-muted-foreground shrink-0">
+                              {ev.attendees?.length ? `${ev.attendees.length} attendee${ev.attendees.length > 1 ? "s" : ""}` : "no attendees"}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {ev.startTime ? new Date(ev.startTime).toLocaleString() : ""}
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* To: */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              To
-            </label>
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <input
-                type="text"
-                value={toEmail}
-                onChange={(e) => setToEmail(e.target.value)}
-                placeholder="founder@startup.com, cofounder@startup.com"
-                className="w-full pl-9 pr-4 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring"
-              />
-            </div>
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              Separate multiple recipients with a comma.
-            </p>
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">To</label>
+            <RecipientField value={toEmail} onChange={setToEmail} contacts={contacts}
+              placeholder="founder@startup.com, cofounder@startup.com" />
+            <p className="mt-1 text-[11px] text-muted-foreground">Separate multiple recipients with a comma. Start typing for suggestions.</p>
             {hasPlaceholder && (
-              <p className="mt-1 text-[11px] text-destructive">
-                Update the founder email on the company page before sending.
-              </p>
+              <p className="mt-1 text-[11px] text-destructive">Update the founder email on the company page before sending.</p>
             )}
           </div>
 
@@ -235,23 +428,13 @@ export function EmailComposer({
             <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
               Cc <span className="normal-case font-normal text-muted-foreground/70">(optional)</span>
             </label>
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <input
-                type="text"
-                value={cc}
-                onChange={(e) => setCc(e.target.value)}
-                placeholder="mentor@thinkingspree.com, partner@fund.com"
-                className="w-full pl-9 pr-4 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring"
-              />
-            </div>
+            <RecipientField value={cc} onChange={setCc} contacts={contacts}
+              placeholder="mentor@thinkingspree.com, partner@fund.com" />
           </div>
 
           {/* Subject */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Subject
-            </label>
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">Subject</label>
             {generating && !subject ? (
               <div className="h-10 rounded-md bg-muted animate-pulse" />
             ) : (
@@ -266,9 +449,7 @@ export function EmailComposer({
 
           {/* Body */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Body
-            </label>
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">Body</label>
             {generating && !body ? (
               <div className="space-y-2">
                 <div className="h-3 rounded bg-muted animate-pulse w-full" />
