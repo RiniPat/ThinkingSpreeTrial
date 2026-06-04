@@ -11,7 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   BarChart3, Plus, Building2, Zap, CheckCircle, Clock, X,
   ChevronRight, ExternalLink, Users, FileText, Mail, ArrowLeft,
-  TrendingUp, Activity, Trash2,
+  TrendingUp, Activity, Trash2, Eye, ArrowUpRight,
 } from "lucide-react";
 
 // ─── Add Incubator Modal ──────────────────────────────────────────────────────
@@ -193,7 +193,16 @@ function VentureDetailModal({ venture, onClose }: { venture: FullVenture; onClos
               {venture.contact && <p className="text-xs text-muted-foreground mt-0.5">📞 {venture.contact}</p>}
               {venture.description && <p className="text-sm text-muted-foreground mt-1 italic">{venture.description}</p>}
             </div>
-            <button onClick={onClose} className="text-muted-foreground hover:text-foreground flex-shrink-0"><X size={20} /></button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={() => { setLocation(`/companies/${venture.id}`); onClose(); }}
+                title="Open full profile in the Companies tab"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-primary border border-primary/30 rounded-lg hover:bg-primary/10 transition"
+              >
+                <ArrowUpRight size={13} />Open in Companies
+              </button>
+              <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X size={20} /></button>
+            </div>
           </div>
 
           {/* Stats row */}
@@ -365,6 +374,7 @@ function IncubatorDetailView({ id, onBack }: { id: number; onBack: () => void })
   const { data, isLoading } = useGetIncubator(id);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
   const deleteIncubator = useDeleteIncubator();
   // Using `any` for flexibility — the runtime payload includes all the rich summary
   // fields (see routes/incubators.ts), but the generated IncubatorVenture type
@@ -463,16 +473,33 @@ function IncubatorDetailView({ id, onBack }: { id: number; onBack: () => void })
                   lastStatus ? "text-blue-600 dark:text-blue-400" : "text-muted-foreground";
 
                 return (
-                  <button key={venture.id} onClick={() => setSelectedVenture(venture)}
-                    className="bg-card border border-card-border rounded-xl p-5 text-left hover:border-primary/40 hover:shadow-md transition-all group w-full">
+                  <div
+                    key={venture.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setLocation(`/companies/${venture.id}`)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setLocation(`/companies/${venture.id}`); } }}
+                    title={`Open ${venture.companyName} in the Companies tab`}
+                    className="bg-card border border-card-border rounded-xl p-5 text-left hover:border-primary/40 hover:shadow-md transition-all group w-full cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  >
                     <div className="flex items-start justify-between mb-3">
                       <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center flex-shrink-0">
                         <Building2 size={18} className="text-primary" />
                       </div>
-                      <ChevronRight size={14} className="text-muted-foreground group-hover:text-primary transition-colors mt-1" />
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setSelectedVenture(venture); }}
+                          title="Quick view (summary popup)"
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+                        >
+                          <Eye size={14} />
+                        </button>
+                        <ArrowUpRight size={15} className="text-muted-foreground group-hover:text-primary transition-colors" />
+                      </div>
                     </div>
 
-                    <h4 className="font-semibold text-foreground mb-0.5">{venture.companyName}</h4>
+                    <h4 className="font-semibold text-foreground mb-0.5 group-hover:text-primary transition-colors">{venture.companyName}</h4>
                     <p className="text-xs text-muted-foreground mb-1">{venture.name}</p>
                     {venture.sector && <span className="text-xs text-muted-foreground/80 bg-secondary px-1.5 py-0.5 rounded">{venture.sector}</span>}
 
@@ -507,7 +534,7 @@ function IncubatorDetailView({ id, onBack }: { id: number; onBack: () => void })
                         </div>
                       </div>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>

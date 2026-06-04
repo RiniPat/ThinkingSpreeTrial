@@ -19,6 +19,7 @@ import sprintSessionsRouter from "./sprintSessions";
 import outcomesReportRouter from "./outcomesReport";
 import builderRouter from "./builderRoutes";
 import summaryBuilderRouter from "./summaryBuilderRoutes";
+import tSheetRouter from "./tSheet";
 
 const router: IRouter = Router();
 
@@ -42,5 +43,6 @@ router.use(sprintSessionsRouter);
 router.use(outcomesReportRouter);
 router.use(builderRouter);
 router.use(summaryBuilderRouter);
+router.use(tSheetRouter);
 
 export default router;

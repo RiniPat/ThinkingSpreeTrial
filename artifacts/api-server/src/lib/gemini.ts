@@ -63,19 +63,19 @@ Hope you are doing well.
 We are excited to initiate your T-Sprints journey for your company [Name of the company] with a 1:1 Need Assessment session.
 
 Let me introduce T-Sprints to you -
-T-Sprints is a new-age consulting format created especially to help startups become successful businesses. We use several principles and frameworks, tailor-made for every problem statement that a startup faces such as traction, revenue generation, scaling up, and financial sustainability.
+**T-Sprints** is a new-age consulting format created especially to help startups become successful businesses. We use several principles and frameworks, tailor-made for every problem statement that a startup faces such as traction, revenue generation, scaling up, and financial sustainability.
 
 In a typical T-Sprint session, which can last for up to 2 hours, our consultants assist founders to chart out the best route forward for their venture.
 
 In our inaugural T-Sprint session, our focus will be on decoding your current business model, identifying key focus areas, and defining goals to work towards.
 
-To make the most out of this session, we recommend the following:
+**To make the most out of this session, we recommend the following:**
 - Keep your broad-level financial numbers readily available.
 - Familiarize yourself with any customer-related data points you may have.
 - Come prepared to discuss, contribute and challenge ideas.
 - Feel free to invite your co-founders to join you.
 
-Your consultants for these sessions, [Name of the Host] - Senior Consultant & [Name of the Co-Host] - Business Research Analyst at Thinking Spree, holding a combined experience of 12+ years in sectors across Strategy, Emerging technologies & Consumer driven sectors are eagerly looking forward to meeting with you on [Day], [Date of Sprint], [Time of Sprint].
+Your consultants for these sessions, [Name of the Host] - Senior Consultant & [Name of the Co-Host] - Business Research Analyst at Thinking Spree, holding a combined experience of 12+ years in sectors across Strategy, Emerging technologies & Consumer driven sectors are eagerly looking forward to meeting with you on **[Day]**, **[Date of Sprint]**, **[Time of Sprint]**.
 
 We are excited to embark on this journey together and actively contribute to shaping the future of your startup.
 
@@ -148,7 +148,9 @@ ${template}
 
 STRICT RULES
 1. Output JSON ONLY — no markdown fences, no preamble. Shape: { "subject": "...", "body": "..." }
-2. Body must be plain text with paragraph breaks (use \\n\\n between paragraphs).
+2. Body must be text with paragraph breaks (use \\n\\n between paragraphs). The ONLY markup allowed is bold: a span wrapped in double asterisks, like **this**. Use NO other markdown (no headings, no italics, no links syntax).
+2a. BOLD PRESERVATION — wherever the TEMPLATE wraps text in **double asterisks**, your output MUST keep that exact span bold with **double asterisks** around the SAME words (after you fill in any merge field). Specifically, in the pre-sprint email these must stay bold: the word **T-Sprints** in the introduction sentence, the line **To make the most out of this session, we recommend the following:**, and the sprint **[Day]**, **[Date of Sprint]**, **[Time of Sprint]** values. Do NOT add bold to any text the template did not mark bold. Do NOT leave a stray or unmatched asterisk.
+2b. If a bold merge field (Day/Date/Time) is "(not provided)" and you soften that sentence per rule 9, drop the asterisks for that omitted value rather than emitting empty **.
 3. If a CONTEXT field is "(not provided)", DO NOT invent a value. Either:
    (a) omit the sentence/clause that referenced it, OR
    (b) keep the surrounding paragraph but rephrase so the missing field isn't needed.

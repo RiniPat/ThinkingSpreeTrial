@@ -5,6 +5,7 @@ import { customFetch } from "@workspace/api-client-react";
 import { Layout } from "@/components/Layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmailComposer } from "@/components/EmailComposer";
+import { CleanSheetDialog, CleanedReportBody, type Report as CleanReport } from "@/components/CleanSheetDialog";
 import { EditCompanyDialog } from "@/components/EditCompanyDialog";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -85,6 +86,7 @@ const EVENT_META: Record<string, { label: string; Icon: React.ElementType; dotCl
   post_email_drafted: { label: "Post-email drafted",  Icon: Sparkles,      dotCls: "bg-amber-500" },
   post_email_sent:    { label: "Post-sprint email sent", Icon: Send,       dotCls: "bg-emerald-500" },
   stage_changed:      { label: "Workflow stage changed", Icon: RefreshCw,  dotCls: "bg-sky-500" },
+  sheet_cleaned:      { label: "T-Sheet cleaned from transcript", Icon: Wand2, dotCls: "bg-fuchsia-500" },
 };
 
 // ─────────── Sub-component: Tracker ─────────────
@@ -581,6 +583,7 @@ export default function CompanyDetailPage() {
   const [tab, setTab] = useState<"overview" | "sprint" | "compare" | "timeline">("overview");
   const [editingEmail, setEditingEmail] = useState(false);
   const [composer, setComposer] = useState<{ open: boolean; kind: "pre" | "post" }>({ open: false, kind: "pre" });
+  const [cleanOpen, setCleanOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteText, setDeleteText] = useState("");
@@ -814,6 +817,28 @@ export default function CompanyDetailPage() {
 
   const c = data.company;
   const events = data.events;
+
+  // Most recent "Clean the Sheet" run, if any — surfaced as a dashboard card.
+  // Falls back from the Google Sheet write when the account can't edit it.
+  const latestClean = (() => {
+    const ev = events.find(e => e.kind === "sheet_cleaned" && e.metadata);
+    if (!ev) return null;
+    const m = ev.metadata as any;
+    const report: CleanReport = {
+      spreadsheetId: m.spreadsheetId ?? "",
+      wrote: !!m.wrote,
+      writeError: m.writeError ?? null,
+      actionsWritten: Array.isArray(m.actionBlocks) ? m.actionBlocks.length : 0,
+      ideasTouched: m.ideasTouched ?? [],
+      audienceRowsAdded: m.audienceRowsAdded ?? (m.extracted?.targetAudience?.length ?? 0),
+      suggestionsAdded: m.suggestionsAdded ?? (m.extracted?.suggestions?.length ?? 0),
+      targetTabFound: m.targetTabFound !== false,
+      actionBlocks: m.actionBlocks ?? [],
+      unmatched: [],
+      extracted: m.extracted ?? { actions: [], targetAudience: [], suggestions: [] },
+    };
+    return { report, at: ev.occurredAt, wrote: !!m.wrote };
+  })();
   const founderEmailMissing = !c.founderEmail || c.founderEmail.includes("@placeholder.local");
   // Stage gating — generous on purpose, since consultants regularly want to
   // re-draft an email after editing context. Workflow-wise:
@@ -919,6 +944,16 @@ export default function CompanyDetailPage() {
                   >
                     {resyncMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                     Re-sync from Sheet
+                  </button>
+                )}
+                {(c.sourceSheetUrl || c.thinkingSheetUrl) && (
+                  <button
+                    onClick={() => setCleanOpen(true)}
+                    className="inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/10 transition"
+                    title="Organise a Fathom transcript into the T-Sheet"
+                  >
+                    <Wand2 className="h-3.5 w-3.5" />
+                    Clean the Sheet
                   </button>
                 )}
                 <button
@@ -1079,6 +1114,26 @@ export default function CompanyDetailPage() {
           </section>
         )}
 
+        {tab === "overview" && latestClean && (
+          <section className={`mt-4 rounded-xl border bg-card p-5 ${latestClean.wrote ? "border-border" : "border-amber-300 dark:border-amber-900/50"}`}>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Wand2 className="h-4 w-4 text-primary" />
+                <h3 className="text-sm font-semibold text-foreground">
+                  Cleaned T-Sheet output
+                </h3>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${latestClean.wrote ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"}`}>
+                  {latestClean.wrote ? "Written to sheet" : "Apply manually"}
+                </span>
+              </div>
+              <span className="text-[11px] text-muted-foreground">
+                {format(parseISO(latestClean.at), "d MMM yyyy, h:mm a")}
+              </span>
+            </div>
+            <CleanedReportBody report={latestClean.report} />
+          </section>
+        )}
+
         {tab === "sprint" && (
           <SprintDataTab
             company={mergeWithSession(c, activeSession)}
@@ -1117,6 +1172,16 @@ export default function CompanyDetailPage() {
         companyName={c.companyName}
         onClose={() => setComposer({ ...composer, open: false })}
         onSent={() => qc.invalidateQueries({ queryKey: ["company", id] })}
+      />
+
+      {/* Clean the Sheet dialog */}
+      <CleanSheetDialog
+        companyId={id}
+        companyName={c.companyName}
+        open={cleanOpen}
+        sheetUrl={c.sourceSheetUrl ?? c.thinkingSheetUrl ?? null}
+        onClose={() => setCleanOpen(false)}
+        onDone={() => qc.invalidateQueries({ queryKey: ["company", id] })}
       />
 
       {/* Edit dialog */}

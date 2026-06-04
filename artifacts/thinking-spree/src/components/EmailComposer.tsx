@@ -54,6 +54,25 @@ function tokens(value: string): string[] {
   return value.split(/[,;]/).map(s => s.trim()).filter(Boolean);
 }
 
+/** Remove our **bold** markers for plain-text contexts (e.g. Copy). */
+function stripBold(value: string): string {
+  return value.replace(/\*\*(.+?)\*\*/gs, "$1");
+}
+
+/**
+ * Render a body string containing **bold** markers into React nodes, so the
+ * consultant sees exactly how the email will look (bold Day/Date/Time, the
+ * "T-Sprints" lead word, the recommendations line). Newlines are preserved.
+ */
+function renderBoldPreview(value: string): React.ReactNode[] {
+  const parts = value.split(/(\*\*[^*]+?\*\*)/g);
+  return parts.map((part, i) => {
+    const m = /^\*\*([^*]+?)\*\*$/.exec(part);
+    if (m) return <strong key={i}>{m[1]}</strong>;
+    return <span key={i}>{part}</span>;
+  });
+}
+
 /** A recipient input with Gmail-style contact suggestions on the current token. */
 function RecipientField({
   value, onChange, contacts, placeholder,
@@ -291,11 +310,50 @@ export function EmailComposer({
   function importEventRecipients(ev: CalEvent) {
     const emails = (ev.attendees ?? []).filter(e => e && e.includes("@") && !e.includes("@placeholder.local"));
     if (emails.length === 0) { toast({ title: "No attendees on that event" }); return; }
-    const merged = Array.from(new Set([...tokens(toEmail), ...emails]));
-    setToEmail(merged.join(", ") + ", ");
+
+    // Decide which attendee is the founder — they go in To:, everyone else in Cc:.
+    //  1) exact match against the company's founder email (most reliable),
+    //  2) the known founder email even if absent from the invite,
+    //  3) heuristic: an attendee whose local-part matches a name token,
+    //  4) fall back to the first attendee.
+    const validFounderEmail = founderEmail && founderEmail.includes("@") && !founderEmail.includes("@placeholder.local")
+      ? founderEmail.trim()
+      : null;
+
+    const lower = emails.map(e => e.toLowerCase());
+    let founderAddr: string | null = null;
+
+    if (validFounderEmail) {
+      const idx = lower.indexOf(validFounderEmail.toLowerCase());
+      founderAddr = idx >= 0 ? emails[idx] : validFounderEmail;
+    } else {
+      const nameTokens = founderName.toLowerCase().split(/\s+/).filter(t => t.length >= 3);
+      const guess = emails.find(e => {
+        const local = e.split("@")[0].toLowerCase();
+        return nameTokens.some(t => local.includes(t));
+      });
+      founderAddr = guess ?? emails[0];
+    }
+
+    const founderLower = founderAddr!.toLowerCase();
+    const others = emails.filter(e => e.toLowerCase() !== founderLower);
+
+    // To: just the founder (merged so a manual entry isn't clobbered).
+    const toMerged = Array.from(new Set([founderAddr!, ...tokens(toEmail)]));
+    setToEmail(toMerged.join(", ") + (toMerged.length ? ", " : ""));
+
+    // Cc: every other attendee, merged with whatever was already in Cc,
+    // and never duplicating the founder.
+    const ccMerged = Array.from(new Set([...tokens(cc), ...others]))
+      .filter(e => e.toLowerCase() !== founderLower);
+    setCc(ccMerged.join(", ") + (ccMerged.length ? ", " : ""));
+
     if (!subject && ev.title) setSubject(kind === "post" ? `Re: ${ev.title}` : ev.title);
     setShowCal(false);
-    toast({ title: `Added ${emails.length} recipient(s)`, description: `From "${ev.title}"` });
+    toast({
+      title: `Founder set as To · ${others.length} in Cc`,
+      description: `From "${ev.title}"`,
+    });
   }
 
   // When the restored draft has no AI text yet (regeneration only fills sprint
@@ -383,6 +441,9 @@ export function EmailComposer({
             </button>
             {showCal && (
               <div className="border-t border-border max-h-48 overflow-auto">
+                <p className="px-3 pt-2 text-[11px] text-muted-foreground">
+                  Importing puts the <span className="font-medium text-foreground">founder in To</span> and everyone else in <span className="font-medium text-foreground">Cc</span>.
+                </p>
                 {(calEvents ?? []).length === 0 ? (
                   <p className="px-3 py-3 text-xs text-muted-foreground">No upcoming events found (next 14 days), or Calendar isn't connected.</p>
                 ) : (
@@ -469,6 +530,19 @@ export function EmailComposer({
                 className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring leading-relaxed font-mono text-[13px]"
               />
             )}
+            {!generating && body && (
+              <div className="mt-2 rounded-md border border-border bg-muted/30">
+                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border">
+                  Formatted preview · how the founder sees it
+                </div>
+                <div className="px-3 py-2.5 text-[13px] leading-relaxed text-foreground whitespace-pre-wrap">
+                  {renderBoldPreview(body)}
+                </div>
+                <p className="px-3 pb-2 text-[11px] text-muted-foreground">
+                  Wrap text in <code className="font-mono">**double asterisks**</code> to bold it. Bold renders in the sent email.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Additional notes + regenerate */}
@@ -504,7 +578,7 @@ export function EmailComposer({
         <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-6 py-3 bg-muted/30">
           <button
             onClick={async () => {
-              await navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`);
+              await navigator.clipboard.writeText(`Subject: ${subject}\n\n${stripBold(body)}`);
               toast({ title: "Copied to clipboard" });
             }}
             disabled={busy || !body}

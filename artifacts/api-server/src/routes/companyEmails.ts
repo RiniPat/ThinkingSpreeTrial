@@ -255,7 +255,47 @@ function parseRecipients(raw: unknown): string[] {
 }
 
 /**
+ * Strip our lightweight bold markers (**like this**) so the plain-text MIME
+ * part reads naturally for clients that don't render HTML.
+ */
+function stripBoldMarkers(s: string): string {
+  return s.replace(/\*\*(.+?)\*\*/gs, "$1");
+}
+
+/** Escape the five HTML-significant characters before we inject our own tags. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Convert the draft body into safe HTML:
+ *   - **bold** → <strong>bold</strong>
+ *   - blank lines separate <p> paragraphs; single newlines become <br>
+ * Everything else is HTML-escaped first so user text can't break the markup.
+ */
+function bodyToHtml(body: string): string {
+  const paragraphs = body.replace(/\r\n/g, "\n").split(/\n{2,}/);
+  const htmlParas = paragraphs.map((para) => {
+    const escaped = escapeHtml(para);
+    const withBold = escaped.replace(/\*\*(.+?)\*\*/gs, "<strong>$1</strong>");
+    const withBreaks = withBold.replace(/\n/g, "<br>");
+    return `<p style="margin:0 0 14px 0;">${withBreaks}</p>`;
+  });
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#1f2937;">${htmlParas.join("")}</div>`;
+}
+
+/**
  * Build a base64url-encoded RFC 2822 message for the Gmail send API.
+ *
+ * We send a multipart/alternative body so the **bold** markers in the draft
+ * render as real bold in the founder's inbox (HTML part) while still degrading
+ * gracefully to clean text (plain part) on clients that prefer text.
+ *
  * Supports multiple To/Cc recipients and optional threading headers.
  */
 function buildRawMessage(opts: {
@@ -266,16 +306,38 @@ function buildRawMessage(opts: {
   inReplyTo?: string | null;   // RFC Message-ID of the email being replied to
   references?: string | null;  // RFC References chain
 }): string {
+  const boundary = `tsprint_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const plain = stripBoldMarkers(opts.body);
+  const html = bodyToHtml(opts.body);
+
   const headers = [
     `To: ${opts.to.join(", ")}`,
     ...(opts.cc && opts.cc.length ? [`Cc: ${opts.cc.join(", ")}`] : []),
     `Subject: ${opts.subject}`,
-    "Content-Type: text/plain; charset=utf-8",
     "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
     ...(opts.inReplyTo ? [`In-Reply-To: ${opts.inReplyTo}`] : []),
     ...(opts.references ? [`References: ${opts.references}`] : []),
   ];
-  const raw = [...headers, "", opts.body].join("\r\n");
+
+  const raw = [
+    ...headers,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    plain,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    html,
+    "",
+    `--${boundary}--`,
+  ].join("\r\n");
+
   return Buffer.from(raw)
     .toString("base64")
     .replace(/\+/g, "-")
