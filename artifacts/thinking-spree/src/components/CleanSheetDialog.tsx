@@ -9,7 +9,7 @@
  * Nothing in the sheet is deleted — notes are appended. The consultant should
  * review the live sheet afterwards (we surface an "Open Sheet" link).
  */
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Wand2, Loader2, X, CheckCircle2, ExternalLink, Lightbulb, AlertCircle, ListChecks, Users2, Copy,
@@ -26,13 +26,15 @@ export type Report = {
   ideasTouched: string[];
   audienceRowsAdded: number;
   suggestionsAdded: number;
+  reorganizedAdded: number;
   targetTabFound: boolean;
   actionBlocks: { idea: string; row: number; block: string }[];
   unmatched: { idea: string; additions: string[] }[];
   extracted: {
-    actions: { idea: string; additions: string[] }[];
-    targetAudience: { audience: string; useCases: string; channels: string; recommendations: string }[];
+    actions: { idea: string; heading?: string; additions: string[] }[];
+    targetAudience: { audience: string; useCases: string; priority?: string; stakeholders?: string; channels: string; recommendations: string }[];
     suggestions: string[];
+    reorganized?: { heading: string; lines: string[] }[];
   };
 };
 
@@ -51,6 +53,41 @@ export function CleanSheetDialog({ companyId, companyName, open, sheetUrl, onClo
   const [transcript, setTranscript] = useState("");
   const [fathomLink, setFathomLink] = useState("");
   const [report, setReport] = useState<Report | null>(null);
+  const [restored, setRestored] = useState(false);
+
+  // ── Persistence (issue 1) ────────────────────────────────────────────────
+  // The cleaned-sheet progress is mirrored to localStorage per company, so
+  // switching browser tabs, navigating away, or reloading keeps the pasted
+  // transcript AND the last result instead of wiping them. Cleared on "Done".
+  const draftKey = `cleanSheet:${companyId}`;
+
+  // Restore on open.
+  useEffect(() => {
+    if (!open) return;
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (d?.transcript) setTranscript(d.transcript);
+        if (d?.fathomLink) setFathomLink(d.fathomLink);
+        if (d?.report) { setReport(d.report); setRestored(true); }
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, draftKey]);
+
+  // Save on change (only while open).
+  useEffect(() => {
+    if (!open) return;
+    try {
+      localStorage.setItem(draftKey, JSON.stringify({ transcript, fathomLink, report }));
+    } catch { /* ignore */ }
+  }, [open, draftKey, transcript, fathomLink, report]);
+
+  const clearDraft = () => {
+    try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    setReport(null); setTranscript(""); setFathomLink(""); setRestored(false);
+  };
 
   const runMutation = useMutation({
     mutationFn: async () => {
@@ -154,7 +191,15 @@ export function CleanSheetDialog({ companyId, companyName, open, sheetUrl, onClo
               )}
             </>
           ) : (
-            <CleanedReportBody report={report} />
+            <>
+              {restored && (
+                <div className="flex items-center justify-between gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/20 dark:text-sky-300">
+                  <span>Restored your last clean for this company.</span>
+                  <button onClick={clearDraft} className="font-medium underline hover:no-underline">Discard &amp; start over</button>
+                </div>
+              )}
+              <CleanedReportBody report={report} />
+            </>
           )}
         </div>
 
@@ -180,7 +225,7 @@ export function CleanSheetDialog({ companyId, companyName, open, sheetUrl, onClo
               </button>
             </>
           ) : (
-            <button onClick={() => { setReport(null); setTranscript(""); setFathomLink(""); onClose(); }}
+            <button onClick={() => { clearDraft(); onClose(); }}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90">
               <CheckCircle2 className="h-3.5 w-3.5" /> Done
             </button>
@@ -218,11 +263,12 @@ export function CleanedReportBody({ report }: { report: Report }) {
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         {[
           { label: "Idea notes", value: report.actionsWritten, Icon: ListChecks },
           { label: "Audience rows", value: report.audienceRowsAdded, Icon: Users2 },
           { label: "Suggestions", value: report.suggestionsAdded, Icon: Lightbulb },
+          { label: "Regrouped", value: report.reorganizedAdded ?? 0, Icon: Wand2 },
         ].map(({ label, value, Icon }) => (
           <div key={label} className="rounded-lg border border-border bg-background p-3 text-center">
             <Icon className="mx-auto mb-1 h-4 w-4 text-primary" />
@@ -313,6 +359,26 @@ export function CleanedReportBody({ report }: { report: Report }) {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {(report.extracted.reorganized?.length ?? 0) > 0 && (
+        <div>
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Re-organised notes {report.wrote ? "(added under headings on Models and priority)" : "(grouped from loose phrases)"}
+          </p>
+          <div className="space-y-2">
+            {report.extracted.reorganized!.map((g, i) => (
+              <div key={i} className="rounded-md border border-border bg-background p-2.5">
+                <p className="text-xs font-medium text-foreground">{g.heading}</p>
+                <ul className="mt-1 space-y-0.5">
+                  {g.lines.map((ln, j) => (
+                    <li key={j} className="text-[12px] text-muted-foreground">- {ln}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

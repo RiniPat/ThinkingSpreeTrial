@@ -92,7 +92,7 @@ The next goal for [Company's Name] is to [Direction of the company]. Towards the
 
 As part of the [Cohort] program, we recommend pursuing mentorship in [in paragraph format from Expert 1:1 (Mentor Connect)/Office hour Support recommendation]. Additionally, explore market connections with [In paragraph format from Market Access on SWOT Tab].
 
-Please find the Thinking Sheet for [Company's Name hyperlinked with the google sheet link] for your reference.
+Please find the Thinking Sheet for [Company's Name] [here]({{SHEET_URL}}) for your reference.
 
 Should you need additional hands-on support for building your venture, you can partner with us for extra T-Sprints. For a detailed discussion, please schedule a meeting by clicking this link.
 
@@ -148,7 +148,8 @@ ${template}
 
 STRICT RULES
 1. Output JSON ONLY — no markdown fences, no preamble. Shape: { "subject": "...", "body": "..." }
-2. Body must be text with paragraph breaks (use \\n\\n between paragraphs). The ONLY markup allowed is bold: a span wrapped in double asterisks, like **this**. Use NO other markdown (no headings, no italics, no links syntax).
+2. Body must be text with paragraph breaks (use \\n\\n between paragraphs). The ONLY markup allowed is bold (a span wrapped in double asterisks, like **this**) and, for the POST-SPRINT email ONLY, a SINGLE link on the word "here" written EXACTLY as [here]({{SHEET_URL}}). Use NO other markdown (no headings, no italics, no other links).
+2c. LINK RULE (post-sprint only): write the Thinking Sheet reference as "...for [Company's Name] [here]({{SHEET_URL}}) for your reference." Keep the literal token {{SHEET_URL}} as the link target — do NOT write or guess an actual URL. If the "Thinking Sheet URL" context field is "(not provided)", omit the entire "Please find the Thinking Sheet..." sentence and do not emit the link.
 2a. BOLD PRESERVATION — wherever the TEMPLATE wraps text in **double asterisks**, your output MUST keep that exact span bold with **double asterisks** around the SAME words (after you fill in any merge field). Specifically, in the pre-sprint email these must stay bold: the word **T-Sprints** in the introduction sentence, the line **To make the most out of this session, we recommend the following:**, and the sprint **[Day]**, **[Date of Sprint]**, **[Time of Sprint]** values. Do NOT add bold to any text the template did not mark bold. Do NOT leave a stray or unmatched asterisk.
 2b. If a bold merge field (Day/Date/Time) is "(not provided)" and you soften that sentence per rule 9, drop the asterisks for that omitted value rather than emitting empty **.
 3. If a CONTEXT field is "(not provided)", DO NOT invent a value. Either:
@@ -205,7 +206,22 @@ export async function generateEmail(kind: EmailKind, ctx: EmailContext): Promise
     throw new Error(`Gemini response missing subject or body. Got: ${JSON.stringify(parsed).slice(0, 300)}`);
   }
 
-  return { subject: parsed.subject.trim(), body: parsed.body.trim() };
+  let body = parsed.body.trim();
+  // Issue 4: the model emits the literal {{SHEET_URL}} token so it can never
+  // hallucinate the link. Substitute the real Thinking Sheet URL here. If we
+  // don't have one, unlink gracefully (keep the word "here" as plain text).
+  if (kind === "post") {
+    const url = ctx.thinkingSheetUrl?.trim();
+    if (url) {
+      body = body.replace(/\{\{\s*SHEET_URL\s*\}\}/g, url);
+    } else {
+      body = body
+        .replace(/\[here\]\(\s*\{\{\s*SHEET_URL\s*\}\}\s*\)/gi, "here")
+        .replace(/\{\{\s*SHEET_URL\s*\}\}/g, "");
+    }
+  }
+
+  return { subject: parsed.subject.trim(), body };
 }
 
 /**

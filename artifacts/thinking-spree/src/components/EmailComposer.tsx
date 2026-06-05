@@ -65,10 +65,12 @@ function stripBold(value: string): string {
  * "T-Sprints" lead word, the recommendations line). Newlines are preserved.
  */
 function renderBoldPreview(value: string): React.ReactNode[] {
-  const parts = value.split(/(\*\*[^*]+?\*\*)/g);
+  const parts = value.split(/(\*\*[^*]+?\*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g);
   return parts.map((part, i) => {
-    const m = /^\*\*([^*]+?)\*\*$/.exec(part);
-    if (m) return <strong key={i}>{m[1]}</strong>;
+    const b = /^\*\*([^*]+?)\*\*$/.exec(part);
+    if (b) return <strong key={i}>{b[1]}</strong>;
+    const l = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(part);
+    if (l) return <a key={i} href={l[2]} target="_blank" rel="noreferrer" className="text-blue-700 underline">{l[1]}</a>;
     return <span key={i}>{part}</span>;
   });
 }

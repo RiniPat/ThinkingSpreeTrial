@@ -66,8 +66,8 @@ router.post("/companies/:id/clean-sheet", async (req, res) => {
     // this is what the consultant applies manually when the sheet couldn't be
     // edited (wrote === false).
     const note = report.wrote
-      ? `Cleaned T-Sheet from transcript — wrote ${report.actionsWritten} idea note(s), ${report.audienceRowsAdded} audience row(s), ${report.suggestionsAdded} suggestion(s) to the sheet.`
-      : `Cleaned T-Sheet from transcript — sheet not editable, ${report.actionsWritten + report.audienceRowsAdded + report.suggestionsAdded} item(s) saved to the dashboard.`;
+      ? `Cleaned T-Sheet from transcript — wrote ${report.actionsWritten} idea note(s), ${report.audienceRowsAdded} audience row(s), ${report.suggestionsAdded} suggestion(s), ${report.reorganizedAdded} regrouped note(s) to the sheet.`
+      : `Cleaned T-Sheet from transcript — sheet not editable, ${report.actionsWritten + report.audienceRowsAdded + report.suggestionsAdded + report.reorganizedAdded} item(s) saved to the dashboard.`;
     await db.insert(companyEventsTable).values({
       founderId: id, userId, kind: "sheet_cleaned",
       note,
@@ -77,6 +77,7 @@ router.post("/companies/:id/clean-sheet", async (req, res) => {
         ideasTouched: report.ideasTouched,
         audienceRowsAdded: report.audienceRowsAdded,
         suggestionsAdded: report.suggestionsAdded,
+        reorganizedAdded: report.reorganizedAdded,
         targetTabFound: report.targetTabFound,
         actionBlocks: report.actionBlocks,
         extracted: report.extracted,

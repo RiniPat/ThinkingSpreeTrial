@@ -832,6 +832,7 @@ export default function CompanyDetailPage() {
       ideasTouched: m.ideasTouched ?? [],
       audienceRowsAdded: m.audienceRowsAdded ?? (m.extracted?.targetAudience?.length ?? 0),
       suggestionsAdded: m.suggestionsAdded ?? (m.extracted?.suggestions?.length ?? 0),
+      reorganizedAdded: m.reorganizedAdded ?? (m.extracted?.reorganized?.length ?? 0),
       targetTabFound: m.targetTabFound !== false,
       actionBlocks: m.actionBlocks ?? [],
       unmatched: [],

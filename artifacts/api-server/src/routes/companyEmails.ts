@@ -259,7 +259,10 @@ function parseRecipients(raw: unknown): string[] {
  * part reads naturally for clients that don't render HTML.
  */
 function stripBoldMarkers(s: string): string {
-  return s.replace(/\*\*(.+?)\*\*/gs, "$1");
+  return s
+    // [here](url) → here (url) so the plain-text part still carries the link.
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, "$1 ($2)")
+    .replace(/\*\*(.+?)\*\*/gs, "$1");
 }
 
 /** Escape the five HTML-significant characters before we inject our own tags. */
@@ -282,7 +285,12 @@ function bodyToHtml(body: string): string {
   const paragraphs = body.replace(/\r\n/g, "\n").split(/\n{2,}/);
   const htmlParas = paragraphs.map((para) => {
     const escaped = escapeHtml(para);
-    const withBold = escaped.replace(/\*\*(.+?)\*\*/gs, "<strong>$1</strong>");
+    // [text](https://…) → anchor. Run before bold so link text can also be bold.
+    const withLinks = escaped.replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer" style="color:#1d4ed8;text-decoration:underline;">$1</a>',
+    );
+    const withBold = withLinks.replace(/\*\*(.+?)\*\*/gs, "<strong>$1</strong>");
     const withBreaks = withBold.replace(/\n/g, "<br>");
     return `<p style="margin:0 0 14px 0;">${withBreaks}</p>`;
   });
