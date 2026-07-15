@@ -588,7 +588,7 @@ router.post("/research/inspiration/recommend", async (req, res) => {
     });
 
     // Persist (or update) the session so the consultant can resume it later.
-    const sessionOutput = { recommendations: out.recommendations, sources: out.sources, researchedCompanies: [] as any[] };
+    const sessionOutput = { peers: out.peers, nextLevel: out.nextLevel, sources: out.sources, researchedCompanies: [] as any[] };
     let sessionId = b.sessionId ? Number(b.sessionId) : null;
     if (sessionId) {
       // preserve any companies already researched under this session
