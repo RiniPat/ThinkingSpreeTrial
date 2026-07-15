@@ -8,8 +8,9 @@
  *   PATCH  /research/outputs/:id              — edit title / notes
  *   DELETE /research/outputs/:id              — remove
  *
- *   POST   /research/inspiration/recommend    — closest real comparables (grounded)
- *   POST   /research/inspiration/roadmap      — grounded, sourced deep-dive + save
+ *   POST   /research/inspiration/recommend    — closest real comparables (grounded) + saves session
+ *   POST   /research/inspiration/roadmap      — grounded, sourced deep-dive + save + link to session
+ *   GET    /research/inspiration/sessions     — resumable workbench sessions
  *
  *   GET    /sales/leads                       — list sales leads
  *   POST   /sales/leads                       — create
@@ -543,7 +544,22 @@ async function resolveSheetContext(
   }
 }
 
-// POST /research/inspiration/recommend — closest real comparables
+// GET /research/inspiration/sessions — resumable workbench sessions (newest first)
+router.get("/research/inspiration/sessions", async (req, res) => {
+  const me = await getMe(req, res); if (!me) return;
+  if (!canAccessResearch(me.role)) { res.status(403).json({ error: "Not authorized" }); return; }
+  try {
+    const rows = await db.select().from(researchOutputsTable)
+      .where(and(eq(researchOutputsTable.userId, me.id), eq(researchOutputsTable.tool, "inspiration_session")))
+      .orderBy(desc(researchOutputsTable.updatedAt));
+    res.json({ sessions: rows });
+  } catch (err) {
+    req.log.error({ err }, "Inspiration sessions list failed");
+    res.status(500).json({ error: "Could not load sessions" });
+  }
+});
+
+// POST /research/inspiration/recommend — closest real comparables (+ saves session)
 router.post("/research/inspiration/recommend", async (req, res) => {
   const me = await getMe(req, res); if (!me) return;
   if (!canAccessResearch(me.role)) { res.status(403).json({ error: "Not authorized" }); return; }
@@ -559,21 +575,48 @@ router.post("/research/inspiration/recommend", async (req, res) => {
   }
 
   try {
-    const { context, warning } = await resolveSheetContext(me.id, b.sheetUrl, req.log);
-    const out = await recommendSimilarCompanies({
+    const setup = {
       companyName, industry,
       specialization: String(b.specialization ?? ""),
-      stage: stage as any, revenueStage: revenueStage as any,
-      geography: b.geography, sheetContext: context,
+      stage, revenueStage,
+      geography: b.geography ?? "",
+      sheetUrl: String(b.sheetUrl ?? ""),
+    };
+    const { context, warning } = await resolveSheetContext(me.id, b.sheetUrl, req.log);
+    const out = await recommendSimilarCompanies({
+      ...setup, stage: stage as any, revenueStage: revenueStage as any, sheetContext: context,
     });
-    res.json({ ...out, sheetWarning: warning ?? null });
+
+    // Persist (or update) the session so the consultant can resume it later.
+    const sessionOutput = { recommendations: out.recommendations, sources: out.sources, researchedCompanies: [] as any[] };
+    let sessionId = b.sessionId ? Number(b.sessionId) : null;
+    if (sessionId) {
+      // preserve any companies already researched under this session
+      const [existing] = await db.select().from(researchOutputsTable)
+        .where(and(eq(researchOutputsTable.id, sessionId), eq(researchOutputsTable.userId, me.id))).limit(1);
+      const prevResearched = (existing?.output as any)?.researchedCompanies ?? [];
+      await db.update(researchOutputsTable).set({
+        title: `Inspiration session · ${companyName}`,
+        inputs: setup,
+        output: { ...sessionOutput, researchedCompanies: prevResearched },
+        updatedAt: new Date(),
+      }).where(and(eq(researchOutputsTable.id, sessionId), eq(researchOutputsTable.userId, me.id)));
+    } else {
+      const [row] = await db.insert(researchOutputsTable).values({
+        userId: me.id, tool: "inspiration_session", founderId: b.founderId ? Number(b.founderId) : null,
+        title: `Inspiration session · ${companyName}`, inputs: setup, output: sessionOutput,
+      }).returning();
+      sessionId = row.id;
+    }
+
+    res.json({ ...out, sessionId, sheetWarning: warning ?? null });
   } catch (err) {
     req.log.error({ err }, "Inspiration recommend failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Recommendation failed" });
   }
 });
 
-// POST /research/inspiration/roadmap — grounded deep dive + persist
+// POST /research/inspiration/roadmap — grounded deep dive + persist (+ link to session)
 router.post("/research/inspiration/roadmap", async (req, res) => {
   const me = await getMe(req, res); if (!me) return;
   if (!canAccessResearch(me.role)) { res.status(403).json({ error: "Not authorized" }); return; }
@@ -582,6 +625,7 @@ router.post("/research/inspiration/roadmap", async (req, res) => {
   const clientCompany = String(b.clientCompany ?? b.companyName ?? "").trim();
   const inspirationCompany = String(b.inspirationCompany ?? "").trim();
   const industry = String(b.industry ?? "").trim();
+  const sessionId = b.sessionId ? Number(b.sessionId) : null;
   if (!clientCompany || !inspirationCompany) {
     res.status(400).json({ error: "clientCompany and inspirationCompany are required." });
     return;
@@ -594,11 +638,11 @@ router.post("/research/inspiration/roadmap", async (req, res) => {
       specialization: String(b.specialization ?? ""),
       stage: String(b.stage ?? ""),
       revenueStage: String(b.revenueStage ?? ""),
-      geography: b.geography,
+      geography: b.geography, sessionId,
     };
     const output = await generateInspirationRoadmap({ ...inputs, sheetContext: context } as any);
 
-    // Persist under the shared research_outputs table (tool tag).
+    // Persist the roadmap under the shared research_outputs table (tool tag).
     const [saved] = await db.insert(researchOutputsTable).values({
       userId: me.id,
       tool: "inspiration_roadmap",
@@ -607,6 +651,21 @@ router.post("/research/inspiration/roadmap", async (req, res) => {
       inputs,
       output: output as any,
     }).returning();
+
+    // Link into the session so the comparison view + resume stay in sync.
+    if (sessionId) {
+      const [session] = await db.select().from(researchOutputsTable)
+        .where(and(eq(researchOutputsTable.id, sessionId), eq(researchOutputsTable.userId, me.id))).limit(1);
+      if (session) {
+        const out = (session.output as any) ?? {};
+        const researched = Array.isArray(out.researchedCompanies) ? out.researchedCompanies : [];
+        const next = researched.filter((r: any) => r.company !== inspirationCompany);
+        next.push({ company: inspirationCompany, roadmapId: saved.id, matchScore: (output as any).matchScore ?? null, at: new Date().toISOString() });
+        await db.update(researchOutputsTable)
+          .set({ output: { ...out, researchedCompanies: next }, updatedAt: new Date() })
+          .where(and(eq(researchOutputsTable.id, sessionId), eq(researchOutputsTable.userId, me.id)));
+      }
+    }
 
     res.json({ output: saved });
   } catch (err) {
