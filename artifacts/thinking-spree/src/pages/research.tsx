@@ -7,7 +7,9 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Sparkles, Users, Target, BarChart3, Globe, Layers,
   Loader2, Trash2, RefreshCw, Search, ChevronRight, Eye,
+  Lightbulb, Wrench,
 } from "lucide-react";
+import InspirationTab from "./InspirationTab";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -290,6 +292,7 @@ function BusinessModelCanvasView({ data }: { data: any }) {
 export default function ResearchPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const [section, setSection] = useState<"inspiration" | "tools">("inspiration");
   const [activeTool, setActiveTool] = useState<ToolKey>("customer_segmentation");
   const [title, setTitle] = useState("");
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -356,11 +359,36 @@ export default function ResearchPage() {
           <div className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Workspace</div>
           <h1 className="mt-2 font-serif text-4xl text-foreground">Research</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            AI-generated research artefacts for prospect companies, market sizing, and positioning.
-            Outputs are saved to the library and can be revisited or regenerated.
+            Deep, web-grounded research for consultants — start from the Inspiration engine to find a
+            client's closest real-world playbook, or use the structured AI tools for segmentation,
+            sizing, and positioning. Outputs are saved to the library.
           </p>
         </section>
 
+        {/* Section switch: Inspiration vs Research tools */}
+        <div className="inline-flex rounded-lg border border-border bg-card p-1">
+          {([
+            { id: "inspiration", label: "Inspiration", Icon: Lightbulb },
+            { id: "tools", label: "Research tools", Icon: Wrench },
+          ] as const).map(s => (
+            <button
+              key={s.id}
+              onClick={() => setSection(s.id)}
+              className={
+                "inline-flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium transition-colors " +
+                (section === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")
+              }
+            >
+              <s.Icon className="h-3.5 w-3.5" />
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {section === "inspiration" && <InspirationTab />}
+
+        {section === "tools" && (
+        <>
         {/* Tool tabs */}
         <div className="flex items-center gap-1 border-b border-border overflow-x-auto">
           {TOOLS.map(t => (
@@ -519,6 +547,8 @@ export default function ResearchPage() {
             </header>
             {renderOutput(activeTool, viewing.output)}
           </section>
+        )}
+        </>
         )}
 
         <footer className="pt-2 text-center text-xs text-muted-foreground">

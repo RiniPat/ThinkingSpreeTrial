@@ -32,6 +32,7 @@ export const RESEARCH_TOOLS = [
   "tam_sam_som",
   "industry_landscape",
   "business_model_canvas",
+  "inspiration_roadmap",   // Research → Inspiration: grounded, sourced deep-dive
 ] as const;
 export type ResearchTool = (typeof RESEARCH_TOOLS)[number];
 

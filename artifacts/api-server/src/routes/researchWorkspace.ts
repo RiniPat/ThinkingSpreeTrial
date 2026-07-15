@@ -8,6 +8,9 @@
  *   PATCH  /research/outputs/:id              — edit title / notes
  *   DELETE /research/outputs/:id              — remove
  *
+ *   POST   /research/inspiration/recommend    — closest real comparables (grounded)
+ *   POST   /research/inspiration/roadmap      — grounded, sourced deep-dive + save
+ *
  *   GET    /sales/leads                       — list sales leads
  *   POST   /sales/leads                       — create
  *   PATCH  /sales/leads/:id                   — update fields / stage
@@ -39,6 +42,11 @@ import {
   generateIndustryLandscape, generateBusinessModelCanvas,
   generateLinkedInOutreach, fillProposalSection,
 } from "../lib/researchAi";
+import XLSX from "xlsx";
+import { fetchSheetAsWorkbook } from "../lib/sheetsFetcher";
+import {
+  recommendSimilarCompanies, generateInspirationRoadmap,
+} from "../lib/researchAi.inspiration";
 
 const router = Router();
 
@@ -493,6 +501,118 @@ router.get("/me/permissions", async (req, res) => {
     canAccessSales: canAccessSales(me.role),
     canManageRoles: canManageRoles(me.role),
   });
+});
+
+// ═══════════════════════ RESEARCH — INSPIRATION ══════════════════════════
+/**
+ * Flatten a Thinking-Sheet workbook into compact, LLM-friendly text. Caps
+ * length so the prompt stays small; skips empty cells.
+ */
+function flattenWorkbook(wb: XLSX.WorkBook, maxChars = 6000): string {
+  const parts: string[] = [];
+  for (const name of wb.SheetNames) {
+    const ws = wb.Sheets[name];
+    const rows = XLSX.utils.sheet_to_json<(string | number | null)[]>(ws, {
+      header: 1, blankrows: false, defval: "",
+    });
+    if (!rows.length) continue;
+    parts.push(`# ${name}`);
+    for (const row of rows) {
+      const cells = (row as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean);
+      if (cells.length) parts.push(cells.join(" | "));
+      if (parts.join("\n").length > maxChars) break;
+    }
+    if (parts.join("\n").length > maxChars) break;
+  }
+  return parts.join("\n").slice(0, maxChars);
+}
+
+/** Resolve a pasted sheet link into flattened text. Never hard-fails the
+ *  request — if the sheet can't be read, proceed without context. */
+async function resolveSheetContext(
+  userId: number, sheetUrl: unknown, log: any,
+): Promise<{ context?: string; warning?: string }> {
+  const url = typeof sheetUrl === "string" ? sheetUrl.trim() : "";
+  if (!url) return {};
+  try {
+    const wb = await fetchSheetAsWorkbook(userId, url);
+    return { context: flattenWorkbook(wb) };
+  } catch (err) {
+    log?.warn?.({ err }, "Inspiration: could not read Thinking Sheet");
+    return { warning: err instanceof Error ? err.message : "Could not read the sheet." };
+  }
+}
+
+// POST /research/inspiration/recommend — closest real comparables
+router.post("/research/inspiration/recommend", async (req, res) => {
+  const me = await getMe(req, res); if (!me) return;
+  if (!canAccessResearch(me.role)) { res.status(403).json({ error: "Not authorized" }); return; }
+
+  const b = req.body ?? {};
+  const companyName = String(b.companyName ?? "").trim();
+  const industry = String(b.industry ?? "").trim();
+  const stage = String(b.stage ?? "").trim();
+  const revenueStage = String(b.revenueStage ?? "").trim();
+  if (!companyName || !industry || !stage || !revenueStage) {
+    res.status(400).json({ error: "companyName, industry, stage and revenueStage are required." });
+    return;
+  }
+
+  try {
+    const { context, warning } = await resolveSheetContext(me.id, b.sheetUrl, req.log);
+    const out = await recommendSimilarCompanies({
+      companyName, industry,
+      specialization: String(b.specialization ?? ""),
+      stage: stage as any, revenueStage: revenueStage as any,
+      geography: b.geography, sheetContext: context,
+    });
+    res.json({ ...out, sheetWarning: warning ?? null });
+  } catch (err) {
+    req.log.error({ err }, "Inspiration recommend failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Recommendation failed" });
+  }
+});
+
+// POST /research/inspiration/roadmap — grounded deep dive + persist
+router.post("/research/inspiration/roadmap", async (req, res) => {
+  const me = await getMe(req, res); if (!me) return;
+  if (!canAccessResearch(me.role)) { res.status(403).json({ error: "Not authorized" }); return; }
+
+  const b = req.body ?? {};
+  const clientCompany = String(b.clientCompany ?? b.companyName ?? "").trim();
+  const inspirationCompany = String(b.inspirationCompany ?? "").trim();
+  const industry = String(b.industry ?? "").trim();
+  if (!clientCompany || !inspirationCompany) {
+    res.status(400).json({ error: "clientCompany and inspirationCompany are required." });
+    return;
+  }
+
+  try {
+    const { context } = await resolveSheetContext(me.id, b.sheetUrl, req.log);
+    const inputs = {
+      clientCompany, inspirationCompany, industry,
+      specialization: String(b.specialization ?? ""),
+      stage: String(b.stage ?? ""),
+      revenueStage: String(b.revenueStage ?? ""),
+      geography: b.geography,
+    };
+    const output = await generateInspirationRoadmap({ ...inputs, sheetContext: context } as any);
+
+    // Persist under the shared research_outputs table (tool tag).
+    const [saved] = await db.insert(researchOutputsTable).values({
+      userId: me.id,
+      tool: "inspiration_roadmap",
+      founderId: b.founderId ? Number(b.founderId) : null,
+      title: `Inspiration · ${clientCompany} ← ${inspirationCompany}`,
+      inputs,
+      output: output as any,
+    }).returning();
+
+    res.json({ output: saved });
+  } catch (err) {
+    req.log.error({ err }, "Inspiration roadmap failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Roadmap generation failed" });
+  }
 });
 
 export default router;
