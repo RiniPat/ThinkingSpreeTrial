@@ -136,38 +136,127 @@ Return JSON ONLY:
 
 // ═══════════════════ 2) Company Overview (snapshot) ════════════════════════
 // Ungrounded — a scannable read of the company from its own material.
+export interface AudienceLevel {
+  level: string;   // e.g. "Total market", "Segment", "ICP", "Beachhead"
+  who: string;     // short label of who this is
+  detail: string;  // <= 12 words
+  size?: string;   // optional rough size, e.g. "~2.4M firms"
+}
+export interface SocialStat { platform: string; metric: string }
 export interface OverviewOutput {
-  snapshot: string;               // 2-3 sentences
-  offerings: string[];
-  targetAudience: string[];
+  snapshot: string;               // <= 2 short sentences
+  offerings: string[];            // <= 5 short phrases
+  audienceFunnel: AudienceLevel[];// top-down: broadest → narrowest (4-5 levels)
   customerSegments: string[];
-  pricing: string;
+  pricing: string;                // short
   geography: string[];
-  revenue: string;
-  edge: string;                   // differentiator / moat
+  revenue: string;                // short
+  traction: {
+    customers?: string;           // e.g. "120 paying · 40 logos"
+    growth?: string;              // e.g. "8% MoM"
+    social?: SocialStat[];        // platform + metric
+    partnerships?: string[];
+    highlights?: string[];        // other notable proof points
+  };
+  edge: string;                   // one line
   gaps: string[];                 // what the deck did NOT make clear
 }
 export async function generateCompanyOverview(p: CompanyProfile, deckText: string): Promise<OverviewOutput> {
-  const prompt = `You are a consultant summarising a client for a pre-sprint brief. Be crisp, not wordy — bullets and short phrases. Use the profile and deck text; where the material is silent, add it to "gaps" instead of guessing.
+  const prompt = `You are a consultant writing a pre-sprint brief. Output must be SCANNABLE, not wordy — short phrases, no paragraphs. Every string stays under ~14 words. Use the profile + deck; if the material is silent on something, use "Not stated" (for traction) or add it to "gaps" — never invent.
 
 ${profileBlock(p)}
 
 === DECK TEXT (may be noisy) ===
 """${(deckText || "").slice(0, 20000)}"""
 
+Build a TOP-DOWN AUDIENCE FUNNEL (4-5 levels) from the broadest possible market down to the narrowest beachhead the company should win first — so a founder can SEE how the total market narrows to their ICP. Each level: a short "who", a <=12-word "detail", and a rough "size" if inferable.
+
+Pull TRACTION signals from the deck: customers/logos onboarded, growth rate, social-media following/engagement, partnerships, other proof points. Use "Not stated" for any that aren't in the material.
+
 Return JSON ONLY:
 {
-  "snapshot": "2-3 sentences on what the company is and does",
-  "offerings": ["product / service lines"],
-  "targetAudience": ["who uses / buys it"],
+  "snapshot": "<= 2 short sentences",
+  "offerings": ["<= 5 short phrases"],
+  "audienceFunnel": [
+    { "level": "Total market", "who": "", "detail": "", "size": "" },
+    { "level": "Segment", "who": "", "detail": "", "size": "" },
+    { "level": "ICP", "who": "", "detail": "", "size": "" },
+    { "level": "Beachhead", "who": "", "detail": "", "size": "" }
+  ],
   "customerSegments": ["distinct segments"],
-  "pricing": "pricing model + points if known, else 'Not stated'",
+  "pricing": "short, or 'Not stated'",
   "geography": ["markets"],
-  "revenue": "revenue signal if known, else 'Not stated'",
-  "edge": "the main differentiator",
-  "gaps": ["specific things the consultant should confirm with the founder"]
+  "revenue": "short signal, or 'Not stated'",
+  "traction": {
+    "customers": "e.g. '120 paying · 40 logos' or 'Not stated'",
+    "growth": "e.g. '8% MoM' or 'Not stated'",
+    "social": [ { "platform": "LinkedIn", "metric": "12k followers" } ],
+    "partnerships": ["names"],
+    "highlights": ["short proof points"]
+  },
+  "edge": "one line",
+  "gaps": ["short items to confirm with the founder"]
 }`;
-  return runJson<OverviewOutput>(prompt, 0.4);
+  return runJson<OverviewOutput>(prompt, 0.3);
+}
+
+// ═══════════════════ 2b) ICP personas + real target accounts (GROUNDED) ════
+export interface IcpPersona {
+  title: string;          // buyer/user job title
+  seniority: string;      // e.g. "Head / Director"
+  segment: string;        // which segment they sit in
+  painPoints: string[];   // <= 3 short
+  goals: string[];        // <= 3 short
+  channels: string[];     // where to reach them
+}
+export interface TargetAccount {
+  company: string;
+  whyFit: string;         // one line
+  website?: string;
+  linkedinUrl?: string;   // ONLY if found in a real source (never fabricated)
+  sourceId?: number;
+}
+export interface IcpPersonasOutput {
+  personas: IcpPersona[];
+  targetAccounts: TargetAccount[];
+  sources: Source[];
+}
+export async function generateIcpPersonas(p: CompanyProfile): Promise<IcpPersonasOutput> {
+  const gatherPrompt = `You are building an Ideal Customer Profile for the client below and finding REAL example target accounts a sales team could actually approach. Use web search.
+
+${profileBlock(p)}
+
+1) Define 2-3 concise BUYER PERSONAS (job titles) — for each: seniority, which segment, up to 3 pains, up to 3 goals, and the best channels to reach them.
+2) Find 5-6 REAL, currently-operating example TARGET-ACCOUNT companies that fit this ICP (right segment, geography, size). For each, note in ONE line why it fits, its website, and its public LinkedIn COMPANY page URL IF you can find the real one.
+
+CRITICAL: Only state a LinkedIn or website URL if it is a real, publicly verifiable page you actually found. If unsure, omit the URL — never guess or fabricate a URL.`;
+  const { text, sources } = await gather(gatherPrompt, 0.5);
+
+  const srcList = sources.map(s => `[${s.id}] ${s.title} — ${s.url}`).join("\n") || "(no live sources)";
+  const structure = `Convert to strict JSON. Keep every string short. Do NOT invent companies or URLs not present in the research; if a URL wasn't found, omit that field. Reference sources by id.
+
+RESEARCH:
+"""${text}"""
+
+SOURCES:
+${srcList}
+
+Return JSON ONLY:
+{
+  "personas": [
+    { "title": "", "seniority": "", "segment": "", "painPoints": ["","",""], "goals": ["",""], "channels": ["",""] }
+  ],
+  "targetAccounts": [
+    { "company": "", "whyFit": "one line", "website": "", "linkedinUrl": "", "sourceId": 1 }
+  ]
+}`;
+  const parsed = await runJson<Omit<IcpPersonasOutput, "sources">>(structure, 0.3);
+  // Strip obviously-fabricated linkedin urls (must look like a real linkedin link).
+  parsed.targetAccounts = (parsed.targetAccounts || []).map(a => ({
+    ...a,
+    linkedinUrl: a.linkedinUrl && /linkedin\.com/i.test(a.linkedinUrl) ? a.linkedinUrl : undefined,
+  }));
+  return { ...parsed, sources };
 }
 
 // ═══════════════════ 3) Blue / Red Ocean (GROUNDED) ════════════════════════
@@ -209,7 +298,7 @@ ${srcList}
 Return JSON ONLY:
 {
   "segments": [
-    { "name": "", "saturation": 0, "growthPotential": 0, "ocean": "blue|red", "rationale": "1-2 sentences with the evidence", "sourceIds": [1] }
+    { "name": "", "saturation": 0, "growthPotential": 0, "ocean": "blue|red", "rationale": "<= 12 words, the key evidence", "sourceIds": [1] }
   ],
   "blueOcean": ["2-3 short 'go here' takeaways"],
   "redOcean": ["2-3 short 'avoid / differentiate' takeaways"]
@@ -241,7 +330,7 @@ Cite specific evidence for the notable ones.`;
   const structure = `Convert the research into strict JSON. India state names MUST be chosen EXACTLY from this allowed list (spelling matters for map join):
 ${INDIA_STATES.join(", ")}
 
-demand is 0-100. Reference sources by id. Omit states with no basis rather than guessing.
+demand is 0-100. Every "note" is a SHORT reason (<= 12 words) explaining WHY that state ranks where it does (the driver: clusters, GCCs, income, hiring, etc.). Reference sources by id. Omit states with no basis rather than guessing.
 
 RESEARCH:
 """${text}"""

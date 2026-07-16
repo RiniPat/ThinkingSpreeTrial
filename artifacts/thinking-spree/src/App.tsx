@@ -23,6 +23,7 @@ import OutcomesReportPage from "@/pages/outcomes-report";
 import BuilderPage from "@/pages/builder";
 import PreSprintPage from "@/pages/pre-sprint";
 import PostSprintPage from "@/pages/post-sprint";
+import InspirationResearchPage from "@/pages/research-inspiration";
 import { customFetch } from "@workspace/api-client-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -110,6 +111,9 @@ function Router() {
         <AuthGuard><AdminRolesPage /></AuthGuard>
       </Route>
       <Route path="/research">
+        <AuthGuard><InspirationResearchPage /></AuthGuard>
+      </Route>
+      <Route path="/research/tools">
         <AuthGuard><ResearchPage /></AuthGuard>
       </Route>
       <Route path="/sales/leads">

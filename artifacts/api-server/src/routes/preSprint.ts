@@ -24,11 +24,11 @@ import { extractTextFromUpload } from "../lib/fileExtract";
 import { fetchWebsiteText } from "../lib/websiteText";
 import {
   extractCompanyProfile, generateCompanyOverview,
-  generateBlueRedOcean, generateDemandLandscape,
+  generateBlueRedOcean, generateDemandLandscape, generateIcpPersonas,
   type CompanyProfile,
 } from "../lib/preSprintAi";
 import {
-  generateIcpMapping, generateTamSamSom,
+  generateTamSamSom,
   generateIndustryLandscape, generateBusinessModelCanvas,
   generateCustomerSegmentation,
 } from "../lib/researchAi";
@@ -228,7 +228,7 @@ router.post("/pre-sprint/companies/:id/generate", async (req, res) => {
       case "demand_landscape":
         output = await generateDemandLandscape(p); break;
       case "icp_mapping":
-        output = await generateIcpMapping({ companyName: p.companyName, productDescription: p.productDescription } as any); break;
+        output = await generateIcpPersonas(p); break;
       case "tam_sam_som":
         output = await generateTamSamSom({ companyName: p.companyName, productDescription: p.productDescription, geography: p.geography } as any); break;
       case "industry_landscape":
