@@ -25,6 +25,7 @@ import PreSprintPage from "@/pages/pre-sprint";
 import PostSprintPage from "@/pages/post-sprint";
 import InspirationResearchPage from "@/pages/research-inspiration";
 import { customFetch } from "@workspace/api-client-react";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -141,7 +142,9 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-          <Router />
+          <ErrorBoundary>
+            <Router />
+          </ErrorBoundary>
         </WouterRouter>
         <Toaster />
       </TooltipProvider>

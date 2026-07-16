@@ -307,6 +307,17 @@ function ToolPanel({ companyId, tool, cached, refetch, render, label, desc, grou
       </div>
     );
   }
+  let body: React.ReactNode;
+  try { body = render(cached.output); }
+  catch (e: any) {
+    body = (
+      <div className="rounded-xl border border-border bg-card p-5 text-sm">
+        <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><AlertTriangle size={14} style={{ color: "hsl(30 60% 45%)" }} /> Couldn’t display this result</div>
+        <p className="text-muted-foreground">The saved output had an unexpected shape. Hit Regenerate to rebuild it.</p>
+        <pre className="mt-2 max-h-40 overflow-auto rounded bg-muted/40 p-2 text-[11px] text-muted-foreground">{String(e?.message ?? e)}</pre>
+      </div>
+    );
+  }
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
@@ -315,7 +326,7 @@ function ToolPanel({ companyId, tool, cached, refetch, render, label, desc, grou
           {gen.isPending ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Regenerate
         </button>
       </div>
-      {render(cached.output)}
+      {body}
     </div>
   );
 }
