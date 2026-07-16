@@ -99,6 +99,12 @@ export const foundersTable = pgTable("founders", {
   // Lives only on the dashboard (not in the Google Sheet). Surfaced on the
   // Sprint Data tab and used as additional context for the post-sprint email.
   observationsTsDashboard: text("observations_ts_dashboard"),
+  // ─── Pre-Sprint intake (migration 013) ─────────────────────────────────
+  specialization: text("specialization"),
+  revenueStage: text("revenue_stage"),
+  websiteUrl: text("website_url"),
+  deckText: text("deck_text"),
+  preSprintProfile: jsonb("pre_sprint_profile"),
   // -----------------------------------------------------------------------
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

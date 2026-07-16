@@ -3,21 +3,19 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 /**
- * One row per AI-generated research artefact. Same shape for all 5 tools
- * (customer segmentation, ICP mapping, TAM/SAM/SOM, industry landscape,
- * business model canvas) — the `tool` column distinguishes them and the
- * `inputs` / `output` JSONB columns flex to each tool's specific shape.
+ * One row per AI-generated research artefact. The `tool` column distinguishes
+ * them and the `inputs` / `output` JSONB columns flex to each tool's shape.
  *
- * Why a single table instead of one per tool: these are all "AI generates
- * structured content; consultant edits; revisits later" — the row shape
- * is identical at the storage layer. Per-tool tables would just be 5x
- * the migrations for the same fields.
+ * Pre-Sprint caching contract: for rows linked to a company (founderId set),
+ * there is AT MOST ONE row per (founderId, tool) — enforced by the partial
+ * unique index in migration 013. Generating replaces that row, so an analysis
+ * is generated once and shown permanently until the consultant regenerates.
  */
 export const researchOutputsTable = pgTable("research_outputs", {
   id: serial("id").primaryKey(),
   userId: integer("user_id"),
   tool: text("tool").notNull(),         // see ResearchTool below
-  founderId: integer("founder_id"),     // optional link to a Companies/founders row
+  founderId: integer("founder_id"),     // link to a Companies/founders row
   title: text("title").notNull(),
   inputs: jsonb("inputs").notNull().default({}),
   output: jsonb("output"),              // null until first generation succeeds
@@ -33,7 +31,11 @@ export const RESEARCH_TOOLS = [
   "industry_landscape",
   "business_model_canvas",
   "inspiration_roadmap",   // Research → Inspiration: grounded, sourced deep-dive
-  "inspiration_session",   // Research → Inspiration: saved workbench session (setup + recs)
+  "inspiration_session",   // Research → Inspiration: saved workbench session
+  // ─── Pre-Sprint (migration 013) ─────────────────────────────────────────
+  "company_overview",      // Overview snapshot from deck + website
+  "blue_red_ocean",        // Market Potential: concentration / ocean analysis
+  "demand_landscape",      // Demand Landscape: per-state + global heat data
 ] as const;
 export type ResearchTool = (typeof RESEARCH_TOOLS)[number];
 

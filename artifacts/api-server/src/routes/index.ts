@@ -20,6 +20,7 @@ import outcomesReportRouter from "./outcomesReport";
 import builderRouter from "./builderRoutes";
 import summaryBuilderRouter from "./summaryBuilderRoutes";
 import tSheetRouter from "./tSheet";
+import preSprintRouter from "./preSprint";
 
 const router: IRouter = Router();
 
@@ -44,5 +45,6 @@ router.use(outcomesReportRouter);
 router.use(builderRouter);
 router.use(summaryBuilderRouter);
 router.use(tSheetRouter);
+router.use(preSprintRouter);
 
 export default router;

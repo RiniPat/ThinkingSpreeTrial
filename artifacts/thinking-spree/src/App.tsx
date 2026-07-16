@@ -21,6 +21,8 @@ import LinkedInOutreachPage from "@/pages/linkedin-outreach";
 import ProposalBuilderPage from "@/pages/proposal-builder";
 import OutcomesReportPage from "@/pages/outcomes-report";
 import BuilderPage from "@/pages/builder";
+import PreSprintPage from "@/pages/pre-sprint";
+import PostSprintPage from "@/pages/post-sprint";
 import { customFetch } from "@workspace/api-client-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -68,6 +70,14 @@ function Router() {
       <Route path="/dashboard">
         <AuthGuard><DashboardPage /></AuthGuard>
       </Route>
+      <Route path="/pre-sprint">
+        <AuthGuard><PreSprintPage /></AuthGuard>
+      </Route>
+      <Route path="/post-sprint">
+        <AuthGuard><PostSprintPage /></AuthGuard>
+      </Route>
+      <Route path="/sales" component={() => <Redirect to="/sales/leads" />} />
+      <Route path="/admin" component={() => <Redirect to="/admin/import" />} />
       <Route path="/companies/:id">
         <AuthGuard><CompanyDetailPage /></AuthGuard>
       </Route>
