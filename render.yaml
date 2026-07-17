@@ -1,0 +1,39 @@
+# Render Blueprint — one-click deploy
+# https://render.com/docs/infrastructure-as-code
+#
+# What this provisions:
+#   • 1 web service (Node.js)  — runs Express + serves the React SPA
+#   • A persistent disk is NOT needed (Postgres is on Neon)
+#
+# Postgres is intentionally NOT in this file — bring your own DATABASE_URL
+# from Neon (free 0.5GB, no sleep). See DEPLOY_TO_RENDER.md.
+
+services:
+  - type: web
+    name: thinking-spree
+    runtime: node
+    plan: free          # 750 hours/month; sleeps after 15 min idle
+    region: singapore   # closest free region to India; change if needed
+    # corepack picks pnpm@10.33.4 from package.json#packageManager
+    buildCommand: "corepack enable && corepack prepare pnpm@10.33.4 --activate && pnpm run render:build"
+    startCommand: "pnpm run render:start"
+    healthCheckPath: /api/healthz
+    autoDeploy: true    # redeploy on every push to the connected branch
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      # Silences corepack's interactive download prompt in CI environments.
+      - key: COREPACK_ENABLE_DOWNLOAD_PROMPT
+        value: "0"
+      # SESSION_SECRET — random 32-byte hex string. Render generates this once
+      # and never shows it again. DO NOT use the dev fallback in production.
+      - key: SESSION_SECRET
+        generateValue: true
+      # ─── Set these manually in the Render dashboard after first deploy: ───
+      # DATABASE_URL          — from Neon (Postgres connection string)
+      # GOOGLE_CLIENT_ID      — from Google Cloud Console
+      # GOOGLE_CLIENT_SECRET  — from Google Cloud Console
+      # GOOGLE_REDIRECT_URI   — https://<your-render-domain>/api/google/oauth/callback
+      # APP_BASE_URL          — https://<your-render-domain>
