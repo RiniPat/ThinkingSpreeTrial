@@ -10,6 +10,7 @@ import {
   Rocket, Upload, FileText, Wand2, Loader2, Sparkles, Plus, Trash2, Check,
   Link2, Layers, Users, Target, Globe, BarChart3, Waves, Flame, Map,
   ExternalLink, RefreshCw, AlertTriangle, TrendingUp, Share2, Handshake,
+  MapPin, Linkedin, Mail, Building2,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -26,7 +27,7 @@ type Analyses = Record<string, { output: any; updatedAt: string }>;
 
 const PRE_TABS = [
   { key: "overview", label: "Overview", icon: FileText },
-  { key: "research", label: "Research Tools", icon: Sparkles },
+  { key: "research", label: "Industry Landscape", icon: Sparkles },
   { key: "market", label: "Market Potential", icon: Waves },
   { key: "demand", label: "Demand Landscape", icon: Map },
 ] as const;
@@ -322,7 +323,7 @@ function CompanyWorkspace({
           <div className="mt-5">
             {tab === "overview" && <ToolPanel companyId={id} tool="company_overview" cached={analyses.company_overview} refetch={refetch} render={renderOverview} label="Overview" desc="A scannable read of the company from its own deck & website." />}
             {tab === "research" && <ResearchTools companyId={id} analyses={analyses} refetch={refetch} />}
-            {tab === "market" && <ToolPanel companyId={id} tool="blue_red_ocean" cached={analyses.blue_red_ocean} refetch={refetch} render={renderOcean} label="Blue / Red Ocean" desc="Industry-concentration on the main offering, with sources." grounded />}
+            {tab === "market" && <MarketPotential companyId={id} analyses={analyses} refetch={refetch} />}
             {tab === "demand" && <ToolPanel companyId={id} tool="demand_landscape" cached={analyses.demand_landscape} refetch={refetch} render={renderDemand} label="Demand Landscape" desc="Where demand concentrates — with the reason for each hotspot." grounded />}
           </div>
         </>
@@ -392,12 +393,11 @@ function ToolPanel({ companyId, tool, cached, refetch, render, label, desc, grou
   );
 }
 
-/* ─────────────────────── Research Tools (4 cards) ──────────────────────── */
+/* ─────────────────────── Industry Landscape (tab: 3 cards) ─────────────── */
 function ResearchTools({ companyId, analyses, refetch }: { companyId: number; analyses: Analyses; refetch: () => void }) {
   const tools = [
     { tool: "icp_mapping", label: "ICP Mapping", icon: Target, render: renderIcp },
-    { tool: "tam_sam_som", label: "TAM / SAM / SOM", icon: BarChart3, render: renderTam },
-    { tool: "industry_landscape", label: "Industry Landscape", icon: Globe, render: renderGeneric },
+    { tool: "industry_landscape", label: "Industry Overview", icon: Globe, render: renderGeneric },
     { tool: "business_model_canvas", label: "Business Model Canvas", icon: Layers, render: renderGeneric },
   ] as const;
   return (
@@ -409,6 +409,24 @@ function ResearchTools({ companyId, analyses, refetch }: { companyId: number; an
         <div key={tool} className="rounded-xl border border-border bg-card p-5">
           <div className="mb-2 flex items-center gap-2"><Icon size={16} style={{ color: GOLD }} /><span className="font-medium text-foreground">{label}</span></div>
           <ToolPanel companyId={companyId} tool={tool} cached={analyses[tool]} refetch={refetch} render={render} label={label} desc={`Generate ${label} from the profile.`} grounded={tool === "icp_mapping"} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─────────────────────── Market Potential (tab: Ocean + TAM/SAM/SOM) ───── */
+function MarketPotential({ companyId, analyses, refetch }: { companyId: number; analyses: Analyses; refetch: () => void }) {
+  const tools = [
+    { tool: "blue_red_ocean", label: "Blue / Red Ocean", icon: Waves, render: renderOcean, grounded: true, desc: "Industry-concentration on the main offering, with sources." },
+    { tool: "tam_sam_som", label: "TAM / SAM / SOM", icon: BarChart3, render: renderTam, grounded: false, desc: "Top-down market sizing from the profile." },
+  ] as const;
+  return (
+    <div className="space-y-4">
+      {tools.map(({ tool, label, icon: Icon, render, grounded, desc }) => (
+        <div key={tool} className="rounded-xl border border-border bg-card p-5">
+          <div className="mb-2 flex items-center gap-2"><Icon size={16} style={{ color: GOLD }} /><span className="font-medium text-foreground">{label}</span></div>
+          <ToolPanel companyId={companyId} tool={tool} cached={analyses[tool]} refetch={refetch} render={render} label={label} desc={desc} grounded={grounded} />
         </div>
       ))}
     </div>
@@ -642,56 +660,135 @@ function renderOcean(o: any) {
   );
 }
 
-/* ─────────────────────── Demand Landscape (with reasoning) ──────────────── */
+/* ─────────────────────── Demand Landscape (city clusters + reach-out) ──── */
 function renderDemand(o: any) {
-  const india = (o.india ?? []).slice().sort((a: any, b: any) => (b.demand ?? 0) - (a.demand ?? 0));
-  const top = india.slice(0, 8);
+  return <DemandLandscapeView o={o} />;
+}
+
+function DemandLandscapeView({ o }: { o: any }) {
+  const clusters = useMemo(
+    () => (o.clusters ?? []).slice().sort((a: any, b: any) => (b.intensity ?? 0) - (a.intensity ?? 0)),
+    [o.clusters],
+  );
+  const [selected, setSelected] = useState(0);
+  const [hover, setHover] = useState<number | null>(null);
+  const active = hover != null ? hover : selected;
+
+  // Backward-compat: older cached results have only state-level `india`.
+  if (!clusters.length) return <LegacyStateDemand o={o} />;
+
   return (
     <div className="rounded-xl border border-border bg-card p-5">
       {o.summary && <p className="mb-4 text-sm leading-relaxed text-foreground">{o.summary}</p>}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
+        {/* MAP + hub list */}
         <div>
-          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground"><Map size={14} style={{ color: GOLD }} /> India</div>
-          <IndiaChoropleth india={o.india ?? []} />
-        </div>
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground"><Target size={14} style={{ color: GOLD }} /> Why these states</div>
-          <div className="space-y-1.5">
-            {top.map((s: any, i: number) => (
-              <div key={i} className="flex items-start gap-2 rounded-lg border border-border p-2">
-                <span className="mt-0.5 inline-flex h-6 min-w-[2.2rem] items-center justify-center rounded px-1 text-[11px] font-bold text-white" style={{ background: `hsl(36 72% ${72 - (s.demand / 100) * 34}%)` }}>{s.demand}</span>
-                <div className="min-w-0"><div className="text-sm font-medium text-foreground">{s.state}</div>{s.note && <div className="text-[11px] text-muted-foreground">{s.note}</div>}</div>
-              </div>
+          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+            <MapPin size={14} style={{ color: GOLD }} /> ICP concentration — city / district hubs
+          </div>
+          <ClusterMap clusters={clusters} states={o.india ?? []} active={active}
+            onHover={setHover} onSelect={setSelected} />
+          <div className="mt-3 space-y-1.5">
+            {clusters.map((c: any, i: number) => (
+              <button key={i} onClick={() => setSelected(i)} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+                className="flex w-full items-start gap-2 rounded-lg border p-2 text-left transition-colors"
+                style={{ borderColor: active === i ? "var(--gold)" : "hsl(var(--border))", background: active === i ? "hsl(36 65% 96%)" : "transparent" }}>
+                <span className="mt-0.5 inline-flex h-6 min-w-[2.2rem] items-center justify-center rounded px-1 text-[11px] font-bold text-white" style={{ background: intensityColor(c.intensity) }}>{c.intensity}</span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-foreground">{c.city}{c.state ? <span className="text-muted-foreground">, {c.state}</span> : null}</div>
+                  {c.why && <div className="text-[11px] text-muted-foreground">{c.why}</div>}
+                </div>
+              </button>
             ))}
           </div>
-          {(o.global ?? []).length > 0 && (
-            <div className="mt-4">
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground"><Globe size={14} style={{ color: GOLD }} /> Global</div>
-              <div className="space-y-1.5">
-                {(o.global ?? []).map((g: any, i: number) => (
-                  <div key={i} className="flex items-start gap-2 rounded-lg border border-border p-2">
-                    <span className="mt-0.5 inline-flex h-6 min-w-[2.2rem] items-center justify-center rounded px-1 text-[11px] font-bold text-white" style={{ background: `hsl(36 72% ${72 - (g.demand / 100) * 34}%)` }}>{g.demand}</span>
-                    <div className="min-w-0"><div className="text-sm font-medium text-foreground">{g.region}</div>{g.note && <div className="text-[11px] text-muted-foreground">{g.note}</div>}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
+
+        {/* REACH-OUT panel (beside the map) */}
+        <ReachOutPanel cluster={clusters[active]} />
       </div>
+
+      {(o.global ?? []).length > 0 && (
+        <div className="mt-5 border-t border-border pt-4">
+          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground"><Globe size={14} style={{ color: GOLD }} /> Overseas regions</div>
+          <div className="flex flex-wrap gap-1.5">
+            {(o.global ?? []).map((g: any, i: number) => (
+              <span key={i} className="inline-flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[11px] text-foreground">
+                <span className="font-semibold">{g.region}</span>{typeof g.demand === "number" ? <span className="text-muted-foreground">· {g.demand}</span> : null}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <Sources sources={o.sources} />
     </div>
   );
 }
 
-function IndiaChoropleth({ india }: { india: { state: string; demand: number; note?: string }[] }) {
+function intensityColor(v: number) { return `hsl(36 72% ${72 - (Math.min(v, 100) / 100) * 40}%)`; }
+
+function ReachOutPanel({ cluster }: { cluster: any }) {
+  if (!cluster) return null;
+  const players: any[] = cluster.majorPlayers ?? [];
+  const contacts: any[] = cluster.contacts ?? [];
+  return (
+    <div className="rounded-xl border border-border p-4" style={{ background: "hsl(42 24% 97%)" }}>
+      <div className="flex items-center gap-2">
+        <MapPin size={15} style={{ color: GOLD }} />
+        <div className="text-sm font-semibold text-foreground">{cluster.city}{cluster.state ? `, ${cluster.state}` : ""}</div>
+      </div>
+      {cluster.why && <p className="mt-1 text-[11px] text-muted-foreground">{cluster.why}</p>}
+
+      {players.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"><Building2 size={12} /> Key major players</div>
+          <div className="flex flex-wrap gap-1.5">
+            {players.map((p, i) => (
+              <span key={i} title={p.note ?? ""} className="rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-foreground">{p.name}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"><Users size={12} /> Reach-out</div>
+        {contacts.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">No public contacts surfaced for this hub — try the players' sites or LinkedIn directly.</p>
+        ) : (
+          <div className="space-y-2">
+            {contacts.map((ct, i) => (
+              <div key={i} className="rounded-lg border border-border bg-card p-2.5">
+                {(ct.name || ct.role) && (
+                  <div className="text-xs font-medium text-foreground">
+                    {ct.name || "Decision-maker"}{ct.role ? <span className="font-normal text-muted-foreground"> · {ct.role}</span> : null}
+                  </div>
+                )}
+                {ct.company && <div className="text-[11px] text-muted-foreground">{ct.company}</div>}
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {ct.linkedin && <a href={ct.linkedin} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground hover:border-foreground/30"><Linkedin size={12} style={{ color: "#0A66C2" }} /> LinkedIn</a>}
+                  {ct.email && <a href={`mailto:${ct.email}`} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground hover:border-foreground/30"><Mail size={12} style={{ color: GOLD }} /> Email</a>}
+                  {ct.website && <a href={ct.website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground hover:border-foreground/30"><Globe size={12} /> Site</a>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <p className="mt-3 flex items-start gap-1 text-[10px] text-muted-foreground"><AlertTriangle size={11} className="mt-0.5 shrink-0" /> AI-surfaced leads — verify before outreach.</p>
+    </div>
+  );
+}
+
+function ClusterMap({ clusters, states, active, onHover, onSelect }: {
+  clusters: any[]; states: { state: string; demand?: number }[];
+  active: number; onHover: (i: number | null) => void; onSelect: (i: number) => void;
+}) {
   const [geo, setGeo] = useState<any>(null);
-  const [hover, setHover] = useState<string | null>(null);
   useEffect(() => { let alive = true; fetch(`${BASE}/india-states.geojson`).then((r) => r.json()).then((g) => { if (alive) setGeo(g); }).catch(() => {}); return () => { alive = false; }; }, []);
-  const demandBy = useMemo(() => { const m: Record<string, number> = {}; for (const d of india) m[d.state] = d.demand; return m; }, [india]);
-  const W = 420, H = 480, PAD = 10;
-  const { paths, ok } = useMemo(() => {
-    if (!geo) return { paths: [] as any[], ok: false };
+  const demandBy = useMemo(() => { const m: Record<string, number> = {}; for (const d of states) m[d.state] = d.demand ?? 0; return m; }, [states]);
+  const W = 460, H = 500, PAD = 12;
+
+  const { paths, project, ok } = useMemo(() => {
+    if (!geo) return { paths: [] as any[], project: null as any, ok: false };
     let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
     const rings: { name: string; polys: number[][][] }[] = [];
     for (const f of geo.features) {
@@ -707,20 +804,69 @@ function IndiaChoropleth({ india }: { india: { state: string; demand: number; no
     const px = (lon: number) => ox + (lon - minLon) * s;
     const py = (lat: number) => oy + (maxLat - lat) * s;
     const paths = rings.map((r) => ({ name: r.name, d: r.polys.map((ring) => "M" + ring.map((pt) => `${px(pt[0]).toFixed(1)},${py(pt[1]).toFixed(1)}`).join("L") + "Z").join(" ") }));
-    return { paths, ok: true };
+    return { paths, project: { px, py }, ok: true };
   }, [geo]);
-  const color = (v: number) => v ? `hsl(36 72% ${78 - (Math.min(v, 100) / 100) * 40}%)` : "hsl(220 18% 92%)";
+
+  const baseColor = (v: number) => v ? `hsl(36 60% ${90 - (Math.min(v, 100) / 100) * 18}%)` : "hsl(220 18% 94%)";
   if (!ok) return <div className="flex h-64 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground"><Loader2 size={16} className="mr-2 animate-spin" /> Loading map…</div>;
+
+  const pins = clusters.map((c) => ({ c, x: c.lng != null ? project.px(c.lng) : null, y: c.lat != null ? project.py(c.lat) : null }));
+
   return (
     <div className="relative">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-        {paths.map((p) => { const v = demandBy[p.name] ?? 0; const on = hover === p.name;
-          return <path key={p.name} d={p.d} fill={color(v)} stroke={on ? NAVY : "white"} strokeWidth={on ? 1.4 : 0.5} onMouseEnter={() => setHover(p.name)} onMouseLeave={() => setHover(null)} style={{ cursor: "pointer" }} />; })}
+        {/* faint state base */}
+        {paths.map((p) => <path key={p.name} d={p.d} fill={baseColor(demandBy[p.name] ?? 0)} stroke="white" strokeWidth={0.5} />)}
+        {/* city hub pins */}
+        {pins.map((pin, i) => {
+          if (pin.x == null || pin.y == null) return null;
+          const on = active === i;
+          const r = 5 + (Math.min(pin.c.intensity, 100) / 100) * 9;
+          return (
+            <g key={i} style={{ cursor: "pointer" }} onMouseEnter={() => onHover(i)} onMouseLeave={() => onHover(null)} onClick={() => onSelect(i)}>
+              <circle cx={pin.x} cy={pin.y} r={r + (on ? 4 : 0)} fill={intensityColor(pin.c.intensity)} fillOpacity={on ? 0.28 : 0.16} />
+              <circle cx={pin.x} cy={pin.y} r={r} fill={intensityColor(pin.c.intensity)} stroke={on ? NAVY : "white"} strokeWidth={on ? 1.6 : 1} />
+            </g>
+          );
+        })}
       </svg>
-      {hover && <div className="pointer-events-none absolute right-2 top-2 rounded-lg px-3 py-2 text-white" style={{ background: NAVY }}>
-        <div className="text-sm font-medium">{hover}</div><div className="text-[11px]" style={{ color: "rgba(255,255,255,.7)" }}>Demand {demandBy[hover] ?? 0}</div></div>}
-      <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground"><span>Low</span>
-        <div className="h-2 flex-1 rounded-full" style={{ background: `linear-gradient(90deg, ${color(8)}, ${color(50)}, ${color(100)})` }} /><span>High</span></div>
+
+      {/* hover card: key players (not "demand") */}
+      {active != null && pins[active] && pins[active].x != null && (
+        <div className="pointer-events-none absolute z-10 max-w-[220px] rounded-lg px-3 py-2 text-white shadow-lg"
+          style={{ background: NAVY, left: `${(pins[active].x! / W) * 100}%`, top: `${(pins[active].y! / H) * 100}%`, transform: "translate(-50%, -115%)" }}>
+          <div className="text-sm font-semibold">{pins[active].c.city}</div>
+          <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: "rgba(255,255,255,.55)" }}>Key major players</div>
+          <div className="text-[11px]" style={{ color: "rgba(255,255,255,.9)" }}>
+            {(pins[active].c.majorPlayers ?? []).slice(0, 4).map((p: any) => p.name).join(" · ") || "See panel →"}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground"><span>Lower ICP density</span>
+        <div className="h-2 flex-1 rounded-full" style={{ background: `linear-gradient(90deg, ${intensityColor(10)}, ${intensityColor(55)}, ${intensityColor(100)})` }} /><span>Hub</span></div>
+    </div>
+  );
+}
+
+/* Backward-compatible fallback for older cached demand results (states only). */
+function LegacyStateDemand({ o }: { o: any }) {
+  const india = (o.india ?? []).slice().sort((a: any, b: any) => (b.demand ?? 0) - (a.demand ?? 0)).slice(0, 10);
+  return (
+    <div className="rounded-xl border border-border bg-card p-5">
+      {o.summary && <p className="mb-4 text-sm leading-relaxed text-foreground">{o.summary}</p>}
+      <div className="mb-2 flex items-center gap-2 rounded-lg px-3 py-2 text-xs" style={{ background: "hsl(36 65% 96%)", color: "hsl(30 60% 30%)" }}>
+        <RefreshCw size={13} /> This is an older result. Re-run to get the new city-cluster heatmap with players & contacts.
+      </div>
+      <div className="space-y-1.5">
+        {india.map((s: any, i: number) => (
+          <div key={i} className="flex items-start gap-2 rounded-lg border border-border p-2">
+            <span className="mt-0.5 inline-flex h-6 min-w-[2.2rem] items-center justify-center rounded px-1 text-[11px] font-bold text-white" style={{ background: intensityColor(s.demand) }}>{s.demand}</span>
+            <div className="min-w-0"><div className="text-sm font-medium text-foreground">{s.state}</div>{s.note && <div className="text-[11px] text-muted-foreground">{s.note}</div>}</div>
+          </div>
+        ))}
+      </div>
+      <Sources sources={o.sources} />
     </div>
   );
 }

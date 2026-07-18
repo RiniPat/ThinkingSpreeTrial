@@ -310,27 +310,53 @@ Return JSON ONLY:
 // ═══════════════════ 4) Demand Landscape (GROUNDED) ════════════════════════
 export interface StateDemand { state: string; demand: number; note: string; sourceIds: number[] }
 export interface RegionDemand { region: string; demand: number; note: string; sourceIds: number[] }
+export interface ClusterPlayer { name: string; note?: string; sourceIds?: number[] }
+export interface ClusterContact {
+  name?: string;      // decision-maker / ICP head, if identifiable
+  role?: string;      // e.g. "Founder", "Head of Sourcing", "VP Ops"
+  company?: string;   // which major player they belong to
+  linkedin?: string;  // public LinkedIn URL (search-derived)
+  email?: string;     // ONLY if publicly listed; never fabricated
+  website?: string;   // company site / contact page
+}
+export interface CityCluster {
+  city: string;                 // hub city, e.g. "Ludhiana"
+  district?: string;            // district, if distinct/useful
+  state: string;                // parent state
+  lat?: number; lng?: number;   // approx coords for map pin
+  intensity: number;            // 0-100 ICP / target-audience concentration
+  why: string;                  // <= 16 words: why the ICP concentrates here
+  majorPlayers: ClusterPlayer[];
+  contacts: ClusterContact[];
+  sourceIds: number[];
+}
 export interface DemandLandscapeOutput {
   summary: string;
-  india: StateDemand[];      // state names ∈ INDIA_STATES
+  clusters: CityCluster[];   // city / district hubs where the ICP concentrates
+  india: StateDemand[];      // state-level heat (kept as a faint base layer)
   global: RegionDemand[];    // countries / regions for overseas expansion
   sources: Source[];
 }
 export async function generateDemandLandscape(p: CompanyProfile): Promise<DemandLandscapeOutput> {
-  const gatherPrompt = `You are mapping WHERE demand concentrates for the client's offering. Use web search for real signals: customer/industry density, hiring, GCC / manufacturing presence, income, sector clusters, relevant infrastructure.
+  const gatherPrompt = `You are mapping WHERE the client's Ideal Customer Profile / target audience physically CONCENTRATES — not just at state level, but at CITY / DISTRICT CLUSTER level (industry hubs). Use web search for real signals: industry clusters, MSME/manufacturing belts, GCC/tech corridors, mandis/markets, export hubs, hiring density, trade-body membership.
 
 ${profileBlock(p)}
 
-1) Rank Indian STATES by demand potential for this offering (0-100), with a short evidence-based note each. Only score states you have a basis for; others can be omitted (they'll default to low).
-2) If the company has (or plans) overseas presence, rank 4-6 countries/regions by demand (0-100) with a note.
-Cite specific evidence for the notable ones.`;
+TASK
+1) Identify 5-9 CITY / DISTRICT CLUSTERS in India that are the strongest HUBS for this client's ICP — the places where the target companies, buyers or decision-makers are densest. Think like the examples: a textile business → Ludhiana, Amritsar, Surat, Tiruppur; an electronics-manufacturing business → Noida, Bengaluru, Coimbatore, etc. Pick hubs specific to THIS client's offering.
+2) For EACH cluster, give: why the ICP concentrates there (the driver), and 2-5 REAL MAJOR PLAYERS (named companies/organisations) that are prominent there and represent the ICP or its ecosystem.
+3) For each cluster, surface HOW TO REACH the decision-makers: name + role of an ICP head where identifiable, a public LinkedIn profile/company URL, the company website/contact page, and a business email ONLY if it is publicly listed. If a contact detail isn't public, OMIT that field — do NOT invent emails or profiles.
+4) Also give a rough state-level ranking (for a base heat layer) and, if relevant, 3-5 overseas regions.
+Cite specific evidence via sources.`;
   const { text, sources } = await gather(gatherPrompt, 0.5);
 
   const srcList = sources.map(s => `[${s.id}] ${s.title} — ${s.url}`).join("\n") || "(no live sources; use inline evidence only)";
-  const structure = `Convert the research into strict JSON. India state names MUST be chosen EXACTLY from this allowed list (spelling matters for map join):
-${INDIA_STATES.join(", ")}
+  const structure = `Convert the research into strict JSON.
 
-demand is 0-100. Every "note" is a SHORT reason (<= 12 words) explaining WHY that state ranks where it does (the driver: clusters, GCCs, income, hiring, etc.). Reference sources by id. Omit states with no basis rather than guessing.
+CLUSTERS (primary): 5-9 city/district hubs. For each provide approximate lat/lng of the city centre (well-known Indian cities — use your knowledge). intensity is 0-100 (ICP concentration). why is <= 16 words. majorPlayers: 2-5 real named companies. contacts: 1-4 entries; include ONLY fields that are real/public — omit any email or linkedin you are not confident is real. NEVER fabricate an email address or profile URL.
+
+India state names for the base layer MUST be chosen EXACTLY from this allowed list (spelling matters for map join):
+${INDIA_STATES.join(", ")}
 
 RESEARCH:
 """${text}"""
@@ -340,12 +366,42 @@ ${srcList}
 
 Return JSON ONLY:
 {
-  "summary": "2-3 sentences: where demand concentrates and why",
-  "india": [ { "state": "Maharashtra", "demand": 0, "note": "", "sourceIds": [1] } ],
+  "summary": "2-3 sentences: where the ICP concentrates and why",
+  "clusters": [
+    {
+      "city": "Ludhiana", "district": "Ludhiana", "state": "Punjab",
+      "lat": 30.90, "lng": 75.85, "intensity": 90,
+      "why": "India's largest knitwear & hosiery manufacturing belt",
+      "majorPlayers": [ { "name": "Company Pvt Ltd", "note": "e.g. exporter", "sourceIds": [1] } ],
+      "contacts": [ { "name": "", "role": "Head of Sourcing", "company": "Company Pvt Ltd", "linkedin": "", "email": "", "website": "" } ],
+      "sourceIds": [1]
+    }
+  ],
+  "india": [ { "state": "Punjab", "demand": 0, "note": "", "sourceIds": [1] } ],
   "global": [ { "region": "United Arab Emirates", "demand": 0, "note": "", "sourceIds": [] } ]
 }`;
   const parsed = await runJson<Omit<DemandLandscapeOutput, "sources">>(structure, 0.3);
-  // Drop any state the model invented that isn't joinable to the map.
+  // Clean clusters: keep valid ones, strip fabricated-looking empties.
+  const clean = (v?: string) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  parsed.clusters = (parsed.clusters || []).filter(c => c && c.city).map(c => ({
+    city: c.city,
+    district: clean(c.district),
+    state: c.state,
+    lat: typeof c.lat === "number" ? c.lat : undefined,
+    lng: typeof c.lng === "number" ? c.lng : undefined,
+    intensity: Math.max(0, Math.min(100, Number(c.intensity) || 0)),
+    why: c.why || "",
+    majorPlayers: (c.majorPlayers || []).slice(0, 6),
+    contacts: (c.contacts || []).map(ct => ({
+      name: clean(ct.name), role: clean(ct.role), company: clean(ct.company),
+      // Only keep a linkedin/website that looks like a URL, and an email that looks like one.
+      linkedin: clean(ct.linkedin) && /linkedin\.com|https?:\/\//i.test(ct.linkedin!) ? ct.linkedin!.trim() : undefined,
+      website: clean(ct.website) && /https?:\/\/|\./.test(ct.website!) ? ct.website!.trim() : undefined,
+      email: clean(ct.email) && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ct.email!.trim()) ? ct.email!.trim() : undefined,
+    })).filter(ct => ct.name || ct.role || ct.linkedin || ct.email || ct.website).slice(0, 5),
+    sourceIds: c.sourceIds || [],
+  }));
+  // Drop any base-layer state that isn't joinable to the map.
   const allowed = new Set<string>(INDIA_STATES as readonly string[]);
   parsed.india = (parsed.india || []).filter(s => allowed.has(s.state));
   return { ...parsed, sources };
