@@ -22,6 +22,7 @@ import summaryBuilderRouter from "./summaryBuilderRoutes";
 import tSheetRouter from "./tSheet";
 import preSprintRouter from "./preSprint";
 import emailWorkspaceRouter from "./emailWorkspace";
+import contactsRouter from "./contacts";
 
 const router: IRouter = Router();
 
@@ -48,5 +49,6 @@ router.use(summaryBuilderRouter);
 router.use(tSheetRouter);
 router.use(preSprintRouter);
 router.use(emailWorkspaceRouter);
+router.use(contactsRouter);
 
 export default router;

@@ -14,3 +14,4 @@ export * from "./growthReports";
 export * from "./summaryBuilds";
 export * from "./calendarSprintMarks";
 export * from "./emailTemplates";
+export * from "./contacts";

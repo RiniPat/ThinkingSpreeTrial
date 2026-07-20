@@ -16,9 +16,7 @@ import AdminHomePage from "@/pages/admin/home";
 import AdminTeamPage from "@/pages/admin/team";
 import AdminRolesPage from "@/pages/admin/roles";
 import ResearchPage from "@/pages/research";
-import SalesLeadsPage from "@/pages/sales-leads";
-import LinkedInOutreachPage from "@/pages/linkedin-outreach";
-import ProposalBuilderPage from "@/pages/proposal-builder";
+import SalesInboxPage from "@/pages/sales-inbox";
 import OutcomesReportPage from "@/pages/outcomes-report";
 import BuilderPage from "@/pages/builder";
 import PreSprintPage from "@/pages/pre-sprint";
@@ -90,7 +88,9 @@ function Router() {
       <Route path="/post-sprint">
         <AuthGuard><PostSprintPage /></AuthGuard>
       </Route>
-      <Route path="/sales" component={() => <Redirect to="/sales/leads" />} />
+      <Route path="/sales">
+        <AuthGuard><SalesInboxPage /></AuthGuard>
+      </Route>
       <Route path="/admin">
         <AuthGuard><AdminHomePage /></AuthGuard>
       </Route>
@@ -133,15 +133,11 @@ function Router() {
       <Route path="/research/tools">
         <AuthGuard><ResearchPage /></AuthGuard>
       </Route>
-      <Route path="/sales/leads">
-        <AuthGuard><SalesLeadsPage /></AuthGuard>
-      </Route>
-      <Route path="/sales/linkedin">
-        <AuthGuard><LinkedInOutreachPage /></AuthGuard>
-      </Route>
-      <Route path="/sales/proposals">
-        <AuthGuard><ProposalBuilderPage /></AuthGuard>
-      </Route>
+      {/* Sales Leads, LinkedIn Outreach & Proposal Builder were retired in
+          favour of the Inbox CRM. Legacy URLs redirect to /sales. */}
+      <Route path="/sales/leads" component={() => <Redirect to="/sales" />} />
+      <Route path="/sales/linkedin" component={() => <Redirect to="/sales" />} />
+      <Route path="/sales/proposals" component={() => <Redirect to="/sales" />} />
       <Route path="/reports/outcomes">
         <AuthGuard><OutcomesReportPage /></AuthGuard>
       </Route>

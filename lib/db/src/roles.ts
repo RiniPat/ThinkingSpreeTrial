@@ -25,6 +25,11 @@ export function canAccessSales(role: string | null | undefined): boolean {
   return role === "consultant" || role === "sales" || role === "admin";
 }
 
+/** Who can use the Inbox CRM (the new Sales tab). Sales + Admin only. */
+export function canAccessInboxCrm(role: string | null | undefined): boolean {
+  return role === "sales" || role === "admin";
+}
+
 /** Who can change other users' roles. */
 export function canManageRoles(role: string | null | undefined): boolean {
   return role === "admin";

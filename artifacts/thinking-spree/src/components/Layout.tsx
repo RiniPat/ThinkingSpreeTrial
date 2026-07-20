@@ -31,6 +31,7 @@ type NavItem = {
   badge?: string;
   adminOnly?: boolean;
   needsSales?: boolean;
+  needsInboxCrm?: boolean;
   // extra path prefixes that should keep this item highlighted
   match?: string[];
 };
@@ -44,7 +45,7 @@ const navItems: NavItem[] = [
     href: "/post-sprint", label: "Post-Sprint", icon: Flag,
     match: ["/summary", "/builder", "/reports/outcomes", "/sprint-tracking"],
   },
-  { href: "/sales", label: "Sales", icon: Users, needsSales: true, match: ["/sales/"] },
+  { href: "/sales", label: "Sales", icon: Users, needsInboxCrm: true, match: ["/sales"] },
   { href: "/admin", label: "Admin", icon: Shield, adminOnly: true, match: ["/admin/"] },
 ];
 
@@ -58,6 +59,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     role: string;
     canAccessResearch: boolean;
     canAccessSales: boolean;
+    canAccessInboxCrm: boolean;
     canManageRoles: boolean;
   }>({
     queryKey: ["/api/me/permissions", (user as any)?.id],
@@ -82,9 +84,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const Sidebar = ({ mobile = false }) => {
     const isAdmin = perms?.role === "admin" || (user as any)?.isAdmin;
     const canSales = perms?.canAccessSales ?? false;
+    const canInboxCrm = perms?.canAccessInboxCrm ?? false;
     const visible = navItems.filter((item) => {
       if (item.adminOnly && !isAdmin) return false;
       if (item.needsSales && !canSales) return false;
+      if (item.needsInboxCrm && !canInboxCrm) return false;
       return true;
     });
 
