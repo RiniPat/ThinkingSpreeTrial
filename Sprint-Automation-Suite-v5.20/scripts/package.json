@@ -1,0 +1,22 @@
+{
+  "name": "@workspace/scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "hello": "tsx ./src/hello.ts",
+    "seed:summary": "tsx ./src/seed-summary-sheets.ts",
+    "seed:excel": "node ./src/seed-excel.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@workspace/db": "workspace:*",
+    "@workspace/importer": "workspace:*",
+    "drizzle-orm": "catalog:",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:"
+  }
+}

@@ -55,3 +55,6 @@ filterable CRM sheet with inbox analytics.
 ## Verified
 All new/changed files pass a TSX/TS parse. Run `pnpm run build` for a full
 typecheck and `pnpm --filter @workspace/db run push` / migrations on deploy.
+
+## Hotfix (batch 4a)
+- `sales-inbox.tsx`: guard the role→style lookup with `metaFor()` so an unexpected/empty contact role can never throw `Cannot read properties of undefined (reading 'bg')`. Falls back to the "Other" style.

@@ -32,6 +32,10 @@ const ROLE_META: Record<Role, { label: string; bg: string; fg: string }> = {
   partner: { label: "Partner", bg: "#E1F5EE", fg: "#0F6E56" },
   other: { label: "Other", bg: "#F1EFE8", fg: "#5F5E5A" },
 };
+/** Never throws: any unexpected/legacy/empty role falls back to "Other". */
+function metaFor(role: string | null | undefined) {
+  return ROLE_META[(role as Role)] ?? ROLE_META.other;
+}
 const WINDOWS: { label: string; v: number | "all" }[] = [
   { label: "3 months", v: 3 }, { label: "6 months", v: 6 }, { label: "12 months", v: 12 },
   { label: "18 months", v: 18 }, { label: "24 months", v: 24 }, { label: "36 months", v: 36 }, { label: "All time", v: "all" },
@@ -251,7 +255,7 @@ function Chips({ value, onChange, options }: { value: string; onChange: (v: stri
 
 function ContactRow({ c, onRole, onPromote }: { c: Contact; onRole: (role: Role, roleLabel?: string) => void; onPromote: () => void }) {
   const [label, setLabel] = useState(c.roleLabel ?? "");
-  const meta = ROLE_META[c.role];
+  const meta = metaFor(c.role);
   const initials = (c.name ?? c.email).split(/[\s@.]+/).slice(0, 2).map((s) => s[0]?.toUpperCase()).join("");
   const statusMeta = c.replyStatus === "replied" ? { t: "Replied", c: "#0F6E56" } : c.replyStatus === "awaiting" ? { t: "Awaiting", c: "#8A5A00" } : { t: "—", c: "#8A8676" };
   return (
