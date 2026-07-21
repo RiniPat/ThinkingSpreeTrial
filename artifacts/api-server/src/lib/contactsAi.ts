@@ -1,6 +1,26 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-export type ContactRole = "founder" | "investor" | "partner" | "other";
+/**
+ * Coarse role buckets. Kept as a small, stable set so the distribution bar,
+ * colour legend and filter chips stay legible — but the AI ALSO returns a
+ * free-form `roleLabel` (e.g. "Accelerator", "Angel", "Design agency",
+ * "Journalist") so contacts can be segregated far more finely than these
+ * buckets alone. The UI shows the label under the bucket.
+ */
+export type ContactRole =
+  | "founder"
+  | "investor"
+  | "partner"
+  | "mentor"
+  | "customer"
+  | "vendor"
+  | "media"
+  | "talent"
+  | "other";
+
+export const AI_ROLES: ContactRole[] = [
+  "founder", "investor", "partner", "mentor", "customer", "vendor", "media", "talent", "other",
+];
 
 export interface ContactInput {
   email: string;
@@ -8,11 +28,17 @@ export interface ContactInput {
   domain?: string | null;
   sampleSubjects?: string[];
 }
-export interface Classification { role: ContactRole; confidence: number; reason?: string }
+export interface Classification {
+  role: ContactRole;
+  roleLabel?: string | null; // specific sub-type the AI picks, e.g. "Accelerator"
+  confidence: number;
+  reason?: string;
+}
 
 const PERSONAL = new Set(["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "yahoo.com", "yahoo.co.in", "icloud.com", "proton.me", "protonmail.com", "live.com", "rediffmail.com"]);
-const SERVICE = ["no-reply", "noreply", "notifications", "mailer", "support", "billing", "info@", "hello@", "team@"];
-const SERVICE_DOMAINS = ["zoom.us", "google.com", "calendly.com", "stripe.com", "docusign", "amazonaws", "sendgrid", "mailchimp", "hubspot", "notion.so", "slack.com", "linkedin.com", "atlassian"];
+const SERVICE = ["no-reply", "noreply", "notifications", "mailer", "donotreply", "do-not-reply", "automated", "bounce"];
+const SERVICE_DOMAINS = ["zoom.us", "calendly.com", "stripe.com", "docusign", "amazonaws", "sendgrid", "mailchimp", "notion.so", "atlassian.net", "intercom", "hubspot", "salesforce"];
+const MEDIA_DOMAINS = ["techcrunch", "yourstory", "inc42", "economictimes", "livemint", "forbes", "entrackr", "moneycontrol", "business-standard", "thehindu", "hindustantimes"];
 
 /**
  * Cheap, deterministic first pass — no AI. Returns a confident role where the
@@ -23,11 +49,18 @@ export function heuristicRole(email: string, domain?: string | null): Classifica
   const e = email.toLowerCase();
   const d = (domain || e.split("@")[1] || "").toLowerCase();
   if (!d) return null;
-  if (SERVICE.some(s => e.includes(s)) || SERVICE_DOMAINS.some(s => d.includes(s))) return { role: "other", confidence: 0.9, reason: "Service / automated address" };
-  if (/\.vc$|ventures?|capital|\bvc\b|equity|\bfund\b|angels?/.test(d)) return { role: "investor", confidence: 0.8, reason: "Investment-firm domain" };
-  if (/nasscom|startupindia|ycombinator|techstars|accelerator|incubat|foundation|\.gov|\.edu|\.ac\.|chamber|council/.test(d)) return { role: "partner", confidence: 0.72, reason: "Institution / programme domain" };
-  if (PERSONAL.has(d)) return null; // personal inbox — could be founder or investor; let AI decide
-  return null;                       // company domain — defer to AI for founder/partner/other
+  if (SERVICE.some(s => e.includes(s)) || SERVICE_DOMAINS.some(s => d.includes(s)))
+    return { role: "other", roleLabel: "Automated / service", confidence: 0.9, reason: "Service / automated address" };
+  if (MEDIA_DOMAINS.some(s => d.includes(s)))
+    return { role: "media", roleLabel: "Press / publication", confidence: 0.82, reason: "Known media domain" };
+  if (/\.vc$|ventures?|capital|\bvc\b|equity|\bfund\b|angels?|partners\.[a-z]+$/.test(d))
+    return { role: "investor", roleLabel: "VC / fund", confidence: 0.8, reason: "Investment-firm domain" };
+  if (/accelerat|incubat|ycombinator|techstars/.test(d))
+    return { role: "partner", roleLabel: "Accelerator / incubator", confidence: 0.78, reason: "Accelerator domain" };
+  if (/nasscom|startupindia|foundation|\.gov|\.edu|\.ac\.|chamber|council|association/.test(d))
+    return { role: "partner", roleLabel: "Institution / ecosystem", confidence: 0.72, reason: "Institution / programme domain" };
+  if (PERSONAL.has(d)) return null; // personal inbox — could be founder, mentor, investor; let AI decide
+  return null;                       // company domain — defer to AI
 }
 
 let genai: GoogleGenerativeAI | null = null;
@@ -40,8 +73,8 @@ function model() {
 
 /**
  * Classify a BATCH of contacts in one call (default caller sends ~40 at a time)
- * so the whole inbox costs tens of calls, not thousands. Returns a role +
- * confidence + short reason per input index.
+ * so the whole inbox costs tens of calls, not thousands. Each result carries a
+ * coarse `role` (bucket) PLUS a specific `roleLabel` sub-type.
  */
 export async function classifyContactsBatch(contacts: ContactInput[]): Promise<Classification[]> {
   if (contacts.length === 0) return [];
@@ -50,22 +83,29 @@ export async function classifyContactsBatch(contacts: ContactInput[]): Promise<C
     return `${i}. ${c.name || "(no name)"} <${c.email}>${subj ? ` — subjects: ${subj}` : ""}`;
   }).join("\n");
 
-  const prompt = `You classify business contacts from someone's email inbox into one role each.
+  const prompt = `You classify business contacts from a startup consultancy's email inbox. For each contact pick ONE coarse role bucket AND a short specific label.
 
-ROLES:
-- founder = a startup founder / operator / company employee (the people being advised or sold to).
-- investor = venture capital, angel, PE, family office — anyone who invests.
-- partner = institutions, incubators, accelerators, associations, government, universities, ecosystem partners.
-- other = vendors, service providers, automated senders, personal contacts, anything not above.
+COARSE ROLES:
+- founder   = startup founder / operator / company being advised or sold to.
+- investor  = VC, angel, PE, family office — anyone who invests.
+- partner   = incubators, accelerators, associations, government, universities, ecosystem partners.
+- mentor    = advisors, domain experts, coaches who guide founders (not investing, not selling).
+- customer  = a client or prospect buying the consultancy's services.
+- vendor    = service providers, tools, agencies the consultancy pays or uses.
+- media     = press, journalists, publications, PR.
+- talent    = job candidates, recruiters, interns, hiring-related.
+- other     = automated senders, personal contacts, anything not above.
 
-Use the email domain as the strongest signal, then the name and the subject lines.
+roleLabel = a 1-3 word specific sub-type, e.g. "Angel investor", "Accelerator", "SaaS vendor", "Journalist", "Design agency", "Recruiter". Keep it human and specific.
+
+Use the email domain as the strongest signal, then the name and subject lines.
 
 CONTACTS:
 ${list}
 
 Return a JSON array, one object per contact IN THE SAME ORDER, no prose:
-[ { "i": 0, "role": "founder|investor|partner|other", "confidence": 0.0, "reason": "<= 8 words" } ]
-confidence is 0-1. Be honest — use "other" and low confidence when unsure rather than guessing.`;
+[ { "i": 0, "role": "founder|investor|partner|mentor|customer|vendor|media|talent|other", "roleLabel": "<1-3 words>", "confidence": 0.0, "reason": "<= 8 words" } ]
+confidence is 0-1. Be honest — prefer "other" with low confidence over guessing.`;
 
   try {
     const res = await model().generateContent(prompt);
@@ -74,9 +114,14 @@ confidence is 0-1. Be honest — use "other" and low confidence when unsure rath
     const out: Classification[] = contacts.map(() => ({ role: "other", confidence: 0.3 }));
     for (const item of arr) {
       const i = Number(item?.i);
-      const role = ["founder", "investor", "partner", "other"].includes(item?.role) ? item.role : "other";
+      const role: ContactRole = AI_ROLES.includes(item?.role) ? item.role : "other";
       if (Number.isInteger(i) && i >= 0 && i < out.length) {
-        out[i] = { role, confidence: Math.max(0, Math.min(1, Number(item?.confidence) || 0.3)), reason: typeof item?.reason === "string" ? item.reason.slice(0, 60) : undefined };
+        out[i] = {
+          role,
+          roleLabel: typeof item?.roleLabel === "string" && item.roleLabel.trim() ? item.roleLabel.trim().slice(0, 40) : null,
+          confidence: Math.max(0, Math.min(1, Number(item?.confidence) || 0.3)),
+          reason: typeof item?.reason === "string" ? item.reason.slice(0, 60) : undefined,
+        };
       }
     }
     return out;

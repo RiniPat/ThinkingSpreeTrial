@@ -19,7 +19,7 @@ import { db, contactsTable, contactSyncStateTable, salesLeadsTable, usersTable }
 import { and, eq, or, ilike, sql, lt, inArray } from "drizzle-orm";
 import { canAccessInboxCrm } from "@workspace/db";
 import { getAuthedClient } from "../lib/google";
-import { heuristicRole, classifyContactsBatch, type ContactRole } from "../lib/contactsAi";
+import { heuristicRole, classifyContactsBatch, AI_ROLES, type ContactRole } from "../lib/contactsAi";
 
 const router = Router();
 const MAX_MESSAGES = 6000;          // safety cap per sync run
@@ -59,6 +59,26 @@ function parseAddresses(v: string): { email: string; name: string }[] {
 }
 const domainOf = (email: string) => email.split("@")[1] || "";
 
+// Placeholder / imported addresses the app itself mints for founders that have
+// no real email yet (see importer + preSprint + companies routes). These are
+// NOT people the consultant emailed from Gmail, so they must never appear in
+// the Inbox CRM.
+const SYNTHETIC_DOMAINS = ["tracking.imported", "pre-sprint.local", "placeholder.local"];
+const SYNTHETIC_SUFFIXES = [".imported", ".local", ".internal", ".invalid", ".test", ".example", ".localhost"];
+/**
+ * True only for a genuine, externally-deliverable counterparty: not the user
+ * themselves, a well-formed address, and not one of the synthetic/imported
+ * placeholder domains. This is the gate that keeps "random" addresses out.
+ */
+function isRealContact(email: string, me: string): boolean {
+  if (!email || email === me) return false;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return false;
+  const d = domainOf(email);
+  if (SYNTHETIC_DOMAINS.includes(d)) return false;
+  if (SYNTHETIC_SUFFIXES.some((s) => d.endsWith(s))) return false;
+  return true;
+}
+
 // ─────────────────────────── background sync ────────────────────────────
 async function setState(ownerId: number, patch: Record<string, unknown>) {
   await db.insert(contactSyncStateTable).values({ ownerId, updatedAt: new Date(), ...patch } as any)
@@ -72,6 +92,16 @@ async function runSync(ownerId: number, opts: { windowMonths: number | null; inc
     if (!client) { await setState(ownerId, { status: "error", message: "Gmail isn't connected. Connect Google in Settings." }); return; }
     const gmail = google.gmail({ version: "v1", auth: client });
     const me = (await gmail.users.getProfile({ userId: "me" })).data.emailAddress?.toLowerCase() || "";
+
+    // Clean up any placeholder / imported addresses that a previous version may
+    // have written into this owner's CRM. These are never real Gmail contacts.
+    await db.delete(contactsTable).where(and(
+      eq(contactsTable.ownerId, ownerId),
+      or(
+        ...SYNTHETIC_DOMAINS.map((d) => ilike(contactsTable.email, `%@${d}`)),
+        ...SYNTHETIC_SUFFIXES.map((s) => ilike(contactsTable.email, `%${s}`)),
+      ) as any,
+    ));
 
     // Build the Gmail search query for the chosen window / incremental delta.
     let q = "";
@@ -93,20 +123,17 @@ async function runSync(ownerId: number, opts: { windowMonths: number | null; inc
     } while (pageToken && ids.length < MAX_MESSAGES);
     await setState(ownerId, { total: ids.length });
 
-    // 2) fetch headers only, aggregate per counterparty
+    // 2) fetch headers only. Record SENT recipients and RECEIVED senders
+    //    SEPARATELY. The Inbox CRM should only ever contain people the
+    //    consultant actually emailed — never every newsletter, cold inbound or
+    //    automated notification that lands in the mailbox. So a contact is
+    //    SEEDED only from a message the user SENT; inbound mail only adds
+    //    reply/received counts, and only for counterparties we already know.
     type Agg = { email: string; name: string; domain: string; sent: number; received: number; first: number; last: number; lastDir: string; subjects: string[] };
-    const map = new Map<string, Agg>();
+    type Evt = { email: string; name: string; ts: number; subject: string };
+    const sentEvents: Evt[] = [];
+    const recvEvents: Evt[] = [];
     let processed = 0;
-    const bump = (email: string, name: string, dir: "sent" | "received", ts: number, subject: string) => {
-      if (!email || email === me) return;
-      let a = map.get(email);
-      if (!a) { a = { email, name, domain: domainOf(email), sent: 0, received: 0, first: ts, last: ts, lastDir: dir, subjects: [] }; map.set(email, a); }
-      if (dir === "sent") a.sent++; else a.received++;
-      if (name && !a.name) a.name = name;
-      if (ts < a.first) a.first = ts;
-      if (ts >= a.last) { a.last = ts; a.lastDir = dir; }
-      if (subject && a.subjects.length < 3) a.subjects.push(subject);
-    };
 
     const chunkSize = 200;
     for (let start = 0; start < ids.length; start += chunkSize) {
@@ -120,12 +147,38 @@ async function runSync(ownerId: number, opts: { windowMonths: number | null; inc
           const ts = Number(msg.data.internalDate) || Date.now();
           const subject = header(hs, "Subject");
           const isSent = from?.email === me;
-          if (isSent) { for (const r of to) bump(r.email, r.name, "sent", ts, subject); }
-          else if (from) { bump(from.email, from.name, "received", ts, subject); }
+          if (isSent) {
+            for (const r of to) if (isRealContact(r.email, me)) sentEvents.push({ email: r.email, name: r.name, ts, subject });
+          } else if (from && isRealContact(from.email, me)) {
+            recvEvents.push({ email: from.email, name: from.name, ts, subject });
+          }
         } catch { /* skip unreadable message */ }
       });
       processed = Math.min(start + chunk.length, ids.length);
       await setState(ownerId, { processed });
+    }
+
+    // 2b) build the contact set FROM SENT MAIL ONLY, then attach replies.
+    const map = new Map<string, Agg>();
+    const touch = (e: Evt, dir: "sent" | "received") => {
+      let a = map.get(e.email);
+      if (!a) { a = { email: e.email, name: e.name, domain: domainOf(e.email), sent: 0, received: 0, first: e.ts, last: e.ts, lastDir: dir, subjects: [] }; map.set(e.email, a); }
+      if (dir === "sent") a.sent++; else a.received++;
+      if (e.name && !a.name) a.name = e.name;
+      if (e.ts < a.first) a.first = e.ts;
+      if (e.ts >= a.last) { a.last = e.ts; a.lastDir = dir; }
+      if (e.subject && a.subjects.length < 3) a.subjects.push(e.subject);
+    };
+    for (const e of sentEvents) touch(e, "sent");
+
+    // "Known" = people already in this owner's CRM, so that during an
+    // incremental refresh a reply to older outreach still attaches even when
+    // the original sent message is outside the fetched window.
+    const priorContacts = await db.select({ email: contactsTable.email }).from(contactsTable).where(eq(contactsTable.ownerId, ownerId));
+    const knownSet = new Set<string>([...map.keys(), ...priorContacts.map((c) => c.email)]);
+    for (const e of recvEvents) {
+      if (knownSet.has(e.email)) touch(e, "received");
+      // else: inbound from someone we never emailed → intentionally dropped.
     }
 
     // 3) figure out which contacts need a role (respect user-locked roles)
@@ -136,18 +189,18 @@ async function runSync(ownerId: number, opts: { windowMonths: number | null; inc
       : [];
     const lockedOrKnown = new Map(existing.map((e) => [e.email, e.roleSource]));
 
-    const roleFor = new Map<string, { role: ContactRole; confidence: number }>();
+    const roleFor = new Map<string, { role: ContactRole; roleLabel: string | null; confidence: number }>();
     const needAI: Agg[] = [];
     for (const a of map.values()) {
       if (lockedOrKnown.get(a.email) === "user") continue; // never overwrite a human decision
       const h = heuristicRole(a.email, a.domain);
-      if (h) roleFor.set(a.email, { role: h.role, confidence: h.confidence });
+      if (h) roleFor.set(a.email, { role: h.role, roleLabel: h.roleLabel ?? null, confidence: h.confidence });
       else needAI.push(a);
     }
     for (let i = 0; i < needAI.length; i += CLASSIFY_BATCH) {
       const batch = needAI.slice(i, i + CLASSIFY_BATCH);
       const res = await classifyContactsBatch(batch.map((a) => ({ email: a.email, name: a.name, domain: a.domain, sampleSubjects: a.subjects })));
-      batch.forEach((a, j) => roleFor.set(a.email, { role: res[j].role, confidence: res[j].confidence }));
+      batch.forEach((a, j) => roleFor.set(a.email, { role: res[j].role, roleLabel: res[j].roleLabel ?? null, confidence: res[j].confidence }));
     }
 
     // 4) upsert contacts (increment counts on incremental, set absolute on full)
@@ -160,7 +213,7 @@ async function runSync(ownerId: number, opts: { windowMonths: number | null; inc
         firstSeen: new Date(a.first), lastContactAt: new Date(a.last), lastDirection: a.lastDir, replyStatus,
         emailsTotal: a.sent + a.received, sentCount: a.sent, receivedCount: a.received, updatedAt: new Date(),
       };
-      if (rf) { base.role = rf.role; base.confidence = rf.confidence; base.roleSource = "ai"; }
+      if (rf) { base.role = rf.role; base.roleLabel = rf.roleLabel; base.confidence = rf.confidence; base.roleSource = "ai"; }
       const setOnConflict: any = {
         name: sql`COALESCE(${contactsTable.name}, ${base.name})`,
         lastContactAt: base.lastContactAt, lastDirection: base.lastDirection, replyStatus, updatedAt: new Date(),
@@ -174,7 +227,7 @@ async function runSync(ownerId: number, opts: { windowMonths: number | null; inc
         setOnConflict.emailsTotal = base.emailsTotal; setOnConflict.sentCount = base.sentCount; setOnConflict.receivedCount = base.receivedCount;
       }
       // Only (re)assign role for non-user-locked rows.
-      if (rf && lockedOrKnown.get(a.email) !== "user") { setOnConflict.role = base.role; setOnConflict.confidence = base.confidence; setOnConflict.roleSource = "ai"; }
+      if (rf && lockedOrKnown.get(a.email) !== "user") { setOnConflict.role = base.role; setOnConflict.roleLabel = base.roleLabel; setOnConflict.confidence = base.confidence; setOnConflict.roleSource = "ai"; }
       await db.insert(contactsTable).values(base).onConflictDoUpdate({ target: [contactsTable.ownerId, contactsTable.email], set: setOnConflict });
     }
 
@@ -231,7 +284,7 @@ router.get("/contacts", async (req, res) => {
   const pageSize = Math.min(100, Math.max(10, Number(req.query.pageSize) || 25));
 
   const conds: any[] = [eq(contactsTable.ownerId, me.id)];
-  if (["founder", "investor", "partner", "other"].includes(role)) conds.push(eq(contactsTable.role, role));
+  if ((AI_ROLES as string[]).includes(role)) conds.push(eq(contactsTable.role, role));
   if (status === "cold") conds.push(lt(contactsTable.lastContactAt, sql`now() - interval '${sql.raw(String(COLD_DAYS))} days'`));
   else if (["replied", "awaiting", "none"].includes(status)) conds.push(eq(contactsTable.replyStatus, status));
   if (search) conds.push(or(ilike(contactsTable.email, `%${search}%`), ilike(contactsTable.name, `%${search}%`), ilike(contactsTable.company, `%${search}%`)) as any);
@@ -250,7 +303,7 @@ router.patch("/contacts/:id", async (req, res) => {
   const me = await getMe(req, res); if (!me) return;
   const id = Number(req.params.id);
   const patch: any = { updatedAt: new Date() };
-  if (typeof req.body?.role === "string" && ["founder", "investor", "partner", "other"].includes(req.body.role)) {
+  if (typeof req.body?.role === "string" && (AI_ROLES as string[]).includes(req.body.role)) {
     patch.role = req.body.role; patch.roleSource = "user"; patch.confidence = null; // user decision locks it
   }
   if (typeof req.body?.roleLabel === "string") patch.roleLabel = req.body.roleLabel.trim() || null;

@@ -13,7 +13,7 @@ const api = (p: string) => `${BASE}/api${p}`;
 const GOLD = "var(--gold)";
 const NAVY = "hsl(222 47% 20%)";
 
-type Role = "founder" | "investor" | "partner" | "other";
+type Role = "founder" | "investor" | "partner" | "mentor" | "customer" | "vendor" | "media" | "talent" | "other";
 type Contact = {
   id: number; email: string; name: string | null; company: string | null; domain: string | null;
   role: Role; roleLabel: string | null; roleSource: "ai" | "user"; confidence: number | null;
@@ -27,11 +27,17 @@ type Stats = {
 type SyncState = { status: "idle" | "running" | "error"; phase?: string | null; processed: number; total: number; lastSyncedAt: string | null; message?: string | null };
 
 const ROLE_META: Record<Role, { label: string; bg: string; fg: string }> = {
-  founder: { label: "Founder", bg: "hsl(36 65% 94%)", fg: "#8A5A00" },
-  investor: { label: "Investor", bg: "#E6F1FB", fg: "#0C447C" },
-  partner: { label: "Partner", bg: "#E1F5EE", fg: "#0F6E56" },
-  other: { label: "Other", bg: "#F1EFE8", fg: "#5F5E5A" },
+  founder:  { label: "Founder",  bg: "hsl(36 65% 94%)", fg: "#8A5A00" },
+  investor: { label: "Investor", bg: "#E6F1FB",         fg: "#0C447C" },
+  partner:  { label: "Partner",  bg: "#E1F5EE",         fg: "#0F6E56" },
+  mentor:   { label: "Mentor",   bg: "#EFEAFB",         fg: "#5B3FA8" },
+  customer: { label: "Customer", bg: "#E0F4F3",         fg: "#0B6B6B" },
+  vendor:   { label: "Vendor",   bg: "#FBEEE1",         fg: "#A85A1F" },
+  media:    { label: "Media",    bg: "#FBE9EF",         fg: "#A32B58" },
+  talent:   { label: "Talent",   bg: "#E9EDFB",         fg: "#364F9E" },
+  other:    { label: "Other",    bg: "#F1EFE8",         fg: "#5F5E5A" },
 };
+const ROLE_ORDER: Role[] = ["founder", "investor", "partner", "mentor", "customer", "vendor", "media", "talent", "other"];
 /** Never throws: any unexpected/legacy/empty role falls back to "Other". */
 function metaFor(role: string | null | undefined) {
   return ROLE_META[(role as Role)] ?? ROLE_META.other;
@@ -122,7 +128,7 @@ export default function SalesInboxPage() {
             <div>
               <h1 className="font-serif text-4xl leading-tight text-foreground">Contacts &amp; inbox analytics</h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                {stats?.lastSyncedAt ? <>Synced {timeAgo(stats.lastSyncedAt)} · {stats.emails.toLocaleString()} emails analysed</> : "Not analysed yet — pick a window and run it."}
+                {stats?.lastSyncedAt ? <>Synced {timeAgo(stats.lastSyncedAt)} · {stats.emails.toLocaleString()} emails analysed · people you’ve emailed only</> : "Not analysed yet — pick a window and run it."}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -171,13 +177,13 @@ export default function SalesInboxPage() {
           <div className="mt-3 rounded-xl border border-border bg-card p-4">
             <div className="mb-2 flex justify-between text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"><span>Contacts by role</span><span>AI-assigned · editable</span></div>
             <div className="flex h-3 overflow-hidden rounded-full">
-              {(["founder", "investor", "partner", "other"] as Role[]).map((r) => {
+              {ROLE_ORDER.map((r) => {
                 const w = (roleCount(r) / distTotal) * 100;
                 return w > 0 ? <div key={r} title={`${ROLE_META[r].label} ${roleCount(r)}`} style={{ width: `${w}%`, background: ROLE_META[r].fg }} /> : null;
               })}
             </div>
-            <div className="mt-2 flex flex-wrap gap-4 text-[11px] text-foreground">
-              {(["founder", "investor", "partner", "other"] as Role[]).map((r) => (
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-foreground">
+              {ROLE_ORDER.filter((r) => roleCount(r) > 0).map((r) => (
                 <span key={r}><span className="mr-1.5 inline-block h-2 w-2 rounded-sm" style={{ background: ROLE_META[r].fg }} />{ROLE_META[r].label} {roleCount(r)}</span>
               ))}
             </div>
@@ -190,7 +196,7 @@ export default function SalesInboxPage() {
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <input className="ts-input pl-8" placeholder="Search name, email, company…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
-          <Chips value={role} onChange={setRole} options={[["all", "All"], ["founder", "Founders"], ["investor", "Investors"], ["partner", "Partners"], ["other", "Other"]]} />
+          <Chips value={role} onChange={setRole} options={[["all", "All"], ["founder", "Founders"], ["investor", "Investors"], ["partner", "Partners"], ["mentor", "Mentors"], ["customer", "Customers"], ["vendor", "Vendors"], ["media", "Media"], ["talent", "Talent"], ["other", "Other"]]} />
           <Chips value={status} onChange={setStatus} options={[["all", "Any status"], ["awaiting", "Awaiting reply"], ["replied", "Replied"], ["cold", "Going cold"]]} />
           <div className="relative">
             <select value={sort} onChange={(e) => setSort(e.target.value)} className="ts-input appearance-none pr-8" style={{ width: "auto" }}>
@@ -263,7 +269,10 @@ function ContactRow({ c, onRole, onPromote }: { c: Contact; onRole: (role: Role,
       <div className="flex min-w-0 items-center gap-2.5">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold" style={{ background: meta.bg, color: meta.fg }}>{initials}</span>
         <div className="min-w-0">
-          <div className="truncate font-medium text-foreground">{c.name || c.email.split("@")[0]}</div>
+          <div className="flex items-center gap-1.5">
+            <span className="truncate font-medium text-foreground">{c.name || c.email.split("@")[0]}</span>
+            {c.roleLabel && <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium leading-none" style={{ background: meta.bg, color: meta.fg }}>{c.roleLabel}</span>}
+          </div>
           <div className="truncate text-[11px] text-muted-foreground">{c.email}{c.company ? ` · ${c.company}` : ""}</div>
         </div>
       </div>
@@ -271,7 +280,7 @@ function ContactRow({ c, onRole, onPromote }: { c: Contact; onRole: (role: Role,
         <div className="relative">
           <select value={c.role} onChange={(e) => onRole(e.target.value as Role, label)}
             className="appearance-none rounded-md py-1 pl-2 pr-6 text-[11px] font-semibold" style={{ background: meta.bg, color: meta.fg, border: "none" }}>
-            {(["founder", "investor", "partner", "other"] as Role[]).map((r) => <option key={r} value={r}>{ROLE_META[r].label}</option>)}
+            {ROLE_ORDER.map((r) => <option key={r} value={r}>{ROLE_META[r].label}</option>)}
           </select>
           <ChevronDown size={11} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2" style={{ color: meta.fg }} />
         </div>
@@ -287,10 +296,10 @@ function ContactRow({ c, onRole, onPromote }: { c: Contact; onRole: (role: Role,
           ? <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground"><Check size={11} /> In pipeline</span>
           : <button onClick={onPromote} title="Promote to pipeline" className="inline-flex items-center gap-0.5 rounded-md border border-border px-1.5 py-1 text-[10px] text-foreground hover:border-foreground/30"><ArrowUpRight size={11} /></button>}
       </div>
-      {c.role === "other" && (
+      {(c.role === "other" || !c.roleLabel) && (
         <div className="col-span-full -mt-1 pl-9">
-          <input value={label} onChange={(e) => setLabel(e.target.value)} onBlur={() => label !== (c.roleLabel ?? "") && onRole("other", label)}
-            placeholder="Add a custom label (e.g. Vendor, Press, Mentor)…" className="ts-input" style={{ maxWidth: 320, fontSize: 11, padding: "4px 8px" }} />
+          <input value={label} onChange={(e) => setLabel(e.target.value)} onBlur={() => label !== (c.roleLabel ?? "") && onRole(c.role, label)}
+            placeholder="Add a specific label (e.g. Accelerator, Angel, Recruiter, Press)…" className="ts-input" style={{ maxWidth: 340, fontSize: 11, padding: "4px 8px" }} />
         </div>
       )}
     </div>
@@ -302,7 +311,7 @@ function EmptyState({ analysed, onRun }: { analysed: boolean; onRun: () => void 
     <div className="flex flex-col items-center justify-center gap-2 p-12 text-center">
       <Mail size={22} style={{ color: GOLD }} />
       <p className="text-sm font-medium text-foreground">{analysed ? "No contacts match these filters" : "Analyse your inbox to build your CRM"}</p>
-      <p className="max-w-sm text-xs text-muted-foreground">{analysed ? "Try clearing filters." : "We’ll read the sender/recipient of every email in your window, dedupe them into contacts, and let the AI suggest a role for each."}</p>
+      <p className="max-w-sm text-xs text-muted-foreground">{analysed ? "Try clearing filters." : "We’ll read who you emailed from your Gmail in this window (people you actually reached out to — not newsletters or cold inbound), dedupe them into contacts, and let the AI suggest a category for each."}</p>
       {!analysed && <button onClick={onRun} className="mt-2 inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold" style={{ background: GOLD, color: "hsl(222 38% 15%)" }}><RefreshCw size={15} /> Analyse inbox</button>}
     </div>
   );

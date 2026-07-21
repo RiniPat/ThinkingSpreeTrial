@@ -19,9 +19,9 @@ export const contactsTable = pgTable("contacts", {
   name: text("name"),
   company: text("company"),
   domain: text("domain"),
-  // role ∈ founder | investor | partner | other
+  // Coarse bucket ∈ founder | investor | partner | mentor | customer | vendor | media | talent | other
   role: text("role").notNull().default("other"),
-  roleLabel: text("role_label"),        // custom label the user types when role = 'other'
+  roleLabel: text("role_label"),        // specific sub-type: AI-suggested (e.g. "Accelerator") or user-typed
   roleSource: text("role_source").notNull().default("ai"), // 'ai' | 'user' — 'user' locks it from re-sync overwrite
   confidence: real("confidence"),        // 0..1 for AI-assigned roles
   emailsTotal: integer("emails_total").notNull().default(0),
@@ -58,7 +58,7 @@ export const contactSyncStateTable = pgTable("contact_sync_state", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const CONTACT_ROLES = ["founder", "investor", "partner", "other"] as const;
+export const CONTACT_ROLES = ["founder", "investor", "partner", "mentor", "customer", "vendor", "media", "talent", "other"] as const;
 export type ContactRole = (typeof CONTACT_ROLES)[number];
 
 export const insertContactSchema = createInsertSchema(contactsTable).omit({ id: true, createdAt: true, updatedAt: true });
