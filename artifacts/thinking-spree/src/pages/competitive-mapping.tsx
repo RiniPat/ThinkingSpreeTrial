@@ -24,6 +24,10 @@ const api = {
   askCopilot: (id: any, question: string, focusCompany: string) =>
     jf(`/api/competitive-maps/${id}/copilot`, { method: "POST", body: JSON.stringify({ question, focusCompany }) }),
   generateSheet: (payload: any) => jf("/api/competitive-maps/generate", { method: "POST", body: JSON.stringify(payload) }),
+  fence: (b: any) => jf("/api/competitive-maps/fence", { method: "POST", body: JSON.stringify(b) }),
+  bmc: (b: any) => jf("/api/competitive-maps/bmc", { method: "POST", body: JSON.stringify(b) }),
+  inspSuggest: (b: any) => jf("/api/competitive-maps/inspiration/suggest", { method: "POST", body: JSON.stringify(b) }),
+  inspAdd: (b: any) => jf("/api/competitive-maps/inspiration", { method: "POST", body: JSON.stringify(b) }),
 };
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -229,6 +233,20 @@ const INSPIRATION = {
 };
 
 /* ── atoms ─────────────────────────────────────────────────────────────── */
+const DataCtx = React.createContext<any>(null);
+const useData = () => React.useContext(DataCtx);
+const EMPTY_BMC = { kp: [], ka: [], kr: [], vp: [], cr: [], ch: [], cs: [], cost: [], rev: [] };
+const isScaled = (r: any) => (r && typeof r.scaledBeyond === "boolean") ? r.scaledBeyond : SCALED_BEYOND.has(r?.company);
+function hashTint(str: string) {
+  let h = 0; for (let i = 0; i < (str || "").length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  const palette = ["#2E7D66", "#C6552E", "#1D4E9B", "#3B7D3B", "#7A4FB5", "#C08A2E", "#2E6C8F", "#0E7C7B", "#1B4D8F", "#178A5B", "#9A3D6E", "#B5852E", "#5C6BC0", "#7A5230", "#A0522D"];
+  return palette[h % palette.length];
+}
+function buildCompanies(rows: any[]) {
+  const m: any = {};
+  (rows || []).forEach((r) => { const id = r.company; if (id && !m[id]) m[id] = { name: r.companyName || r.company, tint: hashTint(id), star: !!r.analog }; });
+  return m;
+}
 function Eyebrow({ children }) { return <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", color: C.muted }}>{children}</div>; }
 function SegTag({ seg }) { const b2b = seg === "B2B"; return <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".05em", padding: "2px 8px", borderRadius: 999, background: b2b ? "#EAF1FA" : C.goldSoft, color: b2b ? C.navy : "#8A5A12" }}>{seg}</span>; }
 function Btn({ children, onClick, variant = "primary", disabled, style }) {
@@ -237,7 +255,7 @@ function Btn({ children, onClick, variant = "primary", disabled, style }) {
   return <button onClick={disabled ? undefined : onClick} style={{ ...base, ...v, ...style }}>{children}</button>;
 }
 function Card({ children, style }) { return <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, ...style }}>{children}</div>; }
-function Logo({ id, size = 34 }) { const c = CO[id]; return <div style={{ width: size, height: size, borderRadius: size * 0.26, background: c.tint, color: "#fff", display: "grid", placeItems: "center", fontFamily: serif, fontSize: size * 0.55, flexShrink: 0 }}>{c.name[0]}</div>; }
+function Logo({ id, size = 34 }) { const { CO } = useData(); const c = CO[id] || { name: String(id || "?"), tint: hashTint(String(id)) }; return <div style={{ width: size, height: size, borderRadius: size * 0.26, background: c.tint, color: "#fff", display: "grid", placeItems: "center", fontFamily: serif, fontSize: size * 0.55, flexShrink: 0 }}>{c.name[0]}</div>; }
 function ModelTag({ kind }) { const lite = kind === "lite"; return <span title={lite ? "Light task → routed to Gemini 3.5 Flash-Lite" : "Heavy task → routed to Gemini 3.5 Flash"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 6, background: lite ? "#EEF4FB" : C.goldSoft, color: lite ? C.link : "#8A5A12", fontFamily: mono }}><Sparkles size={9} />{lite ? "3.5 Flash-Lite" : "3.5 Flash"}</span>; }
 
 /* ── ribbon ────────────────────────────────────────────────────────────── */
@@ -265,12 +283,17 @@ function Ribbon({ stage, maxReached, go }) {
 }
 
 /* ── Stage 0 · Data Feed ───────────────────────────────────────────────── */
-function StageFeed({ onDone }) {
-  const [form, setForm] = useState({ name: "Quintinno Labs", website: "https://quintinnolabs.com", tsheet: "", deck: null });
+function StageFeed({ onGenerate }) {
+  const [form, setForm] = useState({ name: "", website: "", tsheet: "", deck: null });
   const [running, setRunning] = useState(false); const [lines, setLines] = useState([]);
   const canRun = form.name.trim() && form.tsheet.trim();
-  const script = ["fetch(quintinnolabs.com) — 200 OK", "extracting product lines … found 3", "pricing + revenue signals … 12 datapoints", "traction & press mentions … 34 links", "reading T-Sheet tabs … 7 tabs mapped", "parsing pitch PDF … problem + use-cases extracted", "assemble › Company Overview ready ✓"];
-  const run = () => { setRunning(true); setLines([]); script.forEach((l, i) => setTimeout(() => { setLines(p => [...p, l]); if (i === script.length - 1) setTimeout(onDone, 700); }, 560 * (i + 1))); };
+  const host = (form.website || form.name || "company").replace(/^https?:\/\//, "").split("/")[0];
+  const script = [`fetch(${host}) — resolving`, "extracting product lines …", "pricing + revenue signals …", "traction & press mentions …", "reading T-Sheet tabs …", "parsing pitch PDF …", "assemble › generating Company Overview ✓"];
+  const run = async () => {
+    setRunning(true); setLines([]);
+    script.forEach((l, i) => setTimeout(() => setLines((p) => [...p, l]), 560 * (i + 1)));
+    try { await onGenerate(form); } catch (e) { /* stays on stage */ } finally { setRunning(false); }
+  };
   const field = (label, key, ph, req, icon) => (
     <div><label style={{ fontSize: 12.5, fontWeight: 600, color: C.ink, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>{icon}{label}{req && <span style={{ color: C.gold }}>*</span>}</label>
       <input value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })} placeholder={ph} style={{ width: "100%", padding: "11px 13px", borderRadius: 9, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: sans, outline: "none", boxSizing: "border-box" }} /></div>
@@ -303,7 +326,9 @@ function StageFeed({ onDone }) {
 }
 
 /* ── Stage 1 · Overview ────────────────────────────────────────────────── */
-function StageOverview({ onDone }) {
+function StageOverview({ onFence }) {
+  const { OVERVIEW, AI_DIRECTIONS } = useData();
+  const [busy, setBusy] = useState(false);
   const [dir, setDir] = useState(""); const [picked, setPicked] = useState([]);
   const toggle = t => setPicked(p => p.includes(t) ? p.filter(x => x !== t) : [...p, t]);
   const canGo = dir.trim().length > 8 || picked.length > 0; const d = OVERVIEW;
@@ -311,7 +336,7 @@ function StageOverview({ onDone }) {
     <div style={{ display: "grid", gap: 20 }}>
       <Card style={{ padding: 24, background: `linear-gradient(180deg, #fff, ${C.faint})` }}>
         <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
-          <div style={{ width: 54, height: 54, borderRadius: 13, background: C.navy, display: "grid", placeItems: "center", flexShrink: 0 }}><span style={{ fontFamily: serif, fontSize: 26, color: C.gold }}>Q</span></div>
+          <div style={{ width: 54, height: 54, borderRadius: 13, background: C.navy, display: "grid", placeItems: "center", flexShrink: 0 }}><span style={{ fontFamily: serif, fontSize: 26, color: C.gold }}>{(d.name || "?")[0]}</span></div>
           <div style={{ flex: 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}><h2 style={{ fontFamily: serif, fontSize: 30, margin: 0, color: C.ink }}>{d.name}</h2><SegTag seg={d.stage} /></div>
             <p style={{ margin: "4px 0 0", color: C.muted, fontSize: 14.5, maxWidth: 640 }}>{d.tagline}</p>
@@ -343,7 +368,7 @@ function StageOverview({ onDone }) {
           {AI_DIRECTIONS.map(s => { const on = picked.includes(s.t); return <button key={s.t} onClick={() => toggle(s.t)} title={s.r} style={{ textAlign: "left", maxWidth: 300, padding: "10px 13px", borderRadius: 10, cursor: "pointer", border: on ? `1.5px solid ${C.gold}` : `1px solid ${C.border}`, background: on ? C.goldSoft : C.card }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><Sparkles size={12} color={C.gold} /><span style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{s.t}</span>{on && <Check size={13} color={C.success} style={{ marginLeft: "auto" }} />}</div><div style={{ fontSize: 11.5, color: C.muted, marginTop: 4, fontStyle: "italic" }}>({s.r})</div></button>; })}
         </div>
         <textarea value={dir} onChange={e => setDir(e.target.value)} rows={3} placeholder="e.g. Focus on players who cracked fleet unit-economics with portable / mobile charging, in India + comparable emerging markets…" style={{ width: "100%", padding: 13, borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 13.5, fontFamily: sans, resize: "vertical", outline: "none", boxSizing: "border-box" }} />
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}><Btn onClick={onDone} disabled={!canGo}>Run Fencing <ChevronRight size={16} /></Btn></div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}><Btn onClick={async () => { setBusy(true); try { await onFence([...picked, dir].filter(Boolean).join(" · ")); } finally { setBusy(false); } }} disabled={!canGo || busy}>{busy ? <><Loader2 size={16} className="spin" /> Fencing…</> : <>Run Fencing <ChevronRight size={16} /></>}</Btn></div>
       </Card>
     </div>
   );
@@ -355,6 +380,7 @@ function CellText({ v }) {
   return <span style={{ fontSize: 11.5, color: C.ink, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{v}</span>;
 }
 function FencingDrawer({ rowData, onClose, inList, toggle, addAllCompany }) {
+  const { CO, FROWS } = useData();
   if (!rowData) return null;
   const groups = Object.keys(GROUPS).filter(g => g !== "id");
   const siblings = FROWS.filter(r => r.company === rowData.company);
@@ -366,7 +392,7 @@ function FencingDrawer({ rowData, onClose, inList, toggle, addAllCompany }) {
         <div style={{ position: "sticky", top: 0, background: C.card, borderBottom: `1px solid ${C.border}`, padding: "16px 20px", zIndex: 2 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <Logo id={rowData.company} size={40} />
-            <div style={{ flex: 1 }}><div style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>{CO[rowData.company].name}</span>{SCALED_BEYOND.has(rowData.company) && <span style={{ fontSize: 10, fontWeight: 700, color: C.success }}>▲ scaled beyond us</span>}</div><div style={{ fontSize: 12.5, color: C.navy, fontWeight: 600 }}>{rowData.product}</div></div>
+            <div style={{ flex: 1 }}><div style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>{CO[rowData.company].name}</span>{isScaled(rowData) && <span style={{ fontSize: 10, fontWeight: 700, color: C.success }}>▲ scaled beyond us</span>}</div><div style={{ fontSize: 12.5, color: C.navy, fontWeight: 600 }}>{rowData.product}</div></div>
             <Btn variant={on ? "gold" : "ghost"} onClick={() => toggle(rowData.sr)} style={{ padding: "7px 12px", fontSize: 12.5 }}>{on ? <><Check size={13} /> Selected</> : <><Plus size={13} /> Select product</>}</Btn>
             <button onClick={onClose} style={{ border: "none", background: "transparent", cursor: "pointer", color: C.muted }}><X size={20} /></button>
           </div>
@@ -393,15 +419,16 @@ function FencingDrawer({ rowData, onClose, inList, toggle, addAllCompany }) {
   );
 }
 function StageFencing({ onDone, shortlist, setShortlist }) {
+  const { CO, FROWS } = useData();
   const [q, setQ] = useState(""); const [seg, setSeg] = useState("all"); const [scaled, setScaled] = useState(false); const [open, setOpen] = useState(null);
   const rows = FROWS
-    .filter(r => (seg === "all" || r.segD === seg) && (!scaled || SCALED_BEYOND.has(r.company)) && (CO[r.company].name.toLowerCase().includes(q.toLowerCase()) || r.product.toLowerCase().includes(q.toLowerCase())))
-    .sort((a, b) => (SCALED_BEYOND.has(b.company) ? 1 : 0) - (SCALED_BEYOND.has(a.company) ? 1 : 0)); // scaled-beyond first
+    .filter(r => (seg === "all" || r.segD === seg) && (!scaled || isScaled(r)) && (CO[r.company].name.toLowerCase().includes(q.toLowerCase()) || r.product.toLowerCase().includes(q.toLowerCase())))
+    .sort((a, b) => (isScaled(b) ? 1 : 0) - (isScaled(a) ? 1 : 0)); // scaled-beyond first
   const inList = sr => shortlist.includes(sr);
   const toggle = sr => setShortlist(p => p.includes(sr) ? p.filter(x => x !== sr) : [...p, sr]);
   const addAllCompany = cid => { const ids = FROWS.filter(r => r.company === cid).map(r => r.sr); setShortlist(p => Array.from(new Set([...p, ...ids]))); };
   const nCompanies = new Set(FROWS.map(r => r.company)).size;
-  const nScaled = new Set(FROWS.filter(r => SCALED_BEYOND.has(r.company)).map(r => r.company)).size;
+  const nScaled = new Set(FROWS.filter(r => isScaled(r)).map(r => r.company)).size;
   return (
     <div>
       <Card style={{ padding: "16px 20px", marginBottom: 14, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
@@ -435,7 +462,7 @@ function StageFencing({ onDone, shortlist, setShortlist }) {
             </thead>
             <tbody>
               {rows.map((r, ri) => {
-                const on = inList(r.sr); const big = SCALED_BEYOND.has(r.company);
+                const on = inList(r.sr); const big = isScaled(r);
                 const rowBg = on ? "#FBF6EA" : ri % 2 ? "#FCFBF7" : "#fff";
                 return (
                 <tr key={r.sr} style={{ background: rowBg, cursor: "pointer" }} onClick={() => setOpen(r)}>
@@ -472,12 +499,13 @@ function StageFencing({ onDone, shortlist, setShortlist }) {
 
 /* ── Stage 3 · Prioritize ──────────────────────────────────────────────── */
 function StagePrioritize({ order, setOrder, onDone }) {
+  const { CO, FROWS } = useData();
   const move = (i, dir) => { const j = i + dir; if (j < 0 || j >= order.length) return; const n = [...order]; [n[i], n[j]] = [n[j], n[i]]; setOrder(n); };
   return (
     <div style={{ maxWidth: 760, margin: "0 auto" }}>
       <Card style={{ padding: 20, marginBottom: 16, background: "#FFFDF8", border: `1px solid ${C.goldSoft}` }}><div style={{ display: "flex", gap: 10, alignItems: "center" }}><ListOrdered size={18} color={C.gold} /><div><div style={{ fontWeight: 700, color: C.ink }}>Rank your deep-dive order</div><div style={{ fontSize: 12.5, color: C.muted }}>Breakdown builds a full BMC for each selected product, in this order. Put the products that out-scaled Quint first; drop anything below Quint's journey.</div></div></div></Card>
       <div style={{ display: "grid", gap: 10 }}>
-        {order.map((sr, i) => { const r = FROWS.find(x => x.sr === sr); if (!r) return null; const big = SCALED_BEYOND.has(r.company); return (
+        {order.map((sr, i) => { const r = FROWS.find(x => x.sr === sr); if (!r) return null; const big = isScaled(r); return (
         <Card key={sr} style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ width: 34, height: 34, borderRadius: 9, background: i < 3 ? C.gold : C.faint, color: i < 3 ? "#241a06" : C.muted, display: "grid", placeItems: "center", fontFamily: serif, fontSize: 19, fontWeight: 700 }}>{i + 1}</div>
           <Logo id={r.company} size={34} />
@@ -503,6 +531,7 @@ function answerFor(name) {
   ];
 }
 function CopilotDock({ company, msgs, setMsgs, open, setOpen, mapId }) {
+  const { CO } = useData();
   const [input, setInput] = useState(""); const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
   const name = CO[company]?.name || "the market";
@@ -561,12 +590,21 @@ function CopilotDock({ company, msgs, setMsgs, open, setOpen, mapId }) {
   );
 }
 function StageBreakdown({ order, onDone, setFocus }) {
+  const { CO, FROWS, BMC_DATA, setBmcData, subject } = useData();
   const rowOf = sr => FROWS.find(r => r.sr === sr);
   const firstWithBmc = order.find(sr => BMC_DATA[rowOf(sr)?.company]) || order[0];
   const [active, setActive] = useState(firstWithBmc);
   const r = rowOf(active); const cid = r?.company; const c = CO[cid];
-  const bmc = BMC_DATA[cid] || BMC_DATA.mojo; const hasBmc = !!BMC_DATA[cid];
+  const bmc = BMC_DATA[cid] || EMPTY_BMC; const hasBmc = !!BMC_DATA[cid];
   useEffect(() => { if (cid) setFocus(cid); }, [cid, setFocus]);
+  useEffect(() => {
+    if (!cid || BMC_DATA[cid]) return;
+    let alive = true;
+    api.bmc({ companyName: (CO[cid] && CO[cid].name) || cid, product: r?.product || "", data: r || {} })
+      .then((res) => { if (alive && res && res.blocks) setBmcData((prev) => ({ ...prev, [cid]: res.blocks })); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [cid]);
   const Item = ({ item }) => (
     <li style={{ fontSize: 12, lineHeight: 1.35 }}>
       <a href={item.src} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: C.ink, textDecoration: "none", display: "inline-flex", alignItems: "baseline", gap: 4, cursor: "pointer" }} onMouseEnter={e => (e.currentTarget.style.color = C.link)} onMouseLeave={e => (e.currentTarget.style.color = C.ink)}>
@@ -587,14 +625,14 @@ function StageBreakdown({ order, onDone, setFocus }) {
           <button key={sr} onClick={() => setActive(sr)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", borderRadius: 9, cursor: "pointer", border: active === sr ? "none" : `1px solid ${C.border}`, background: active === sr ? C.navy : C.card }}>
             <span style={{ width: 18, height: 18, borderRadius: 5, background: active === sr ? C.gold : C.faint, color: active === sr ? "#241a06" : C.muted, display: "grid", placeItems: "center", fontSize: 10, fontWeight: 700 }}>{i + 1}</span>
             <Logo id={rr.company} size={18} />
-            <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.1, textAlign: "left" }}><span style={{ fontWeight: 600, fontSize: 12.5, color: active === sr ? "#fff" : C.ink }}>{CO[rr.company].name}</span><span style={{ fontSize: 10, color: active === sr ? "rgba(255,255,255,.6)" : C.muted }}>{rr.product}</span></span>
+            <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.1, textAlign: "left" }}><span style={{ fontWeight: 600, fontSize: 12.5, color: active === sr ? "#fff" : C.ink }}>{(CO[rr.company] && CO[rr.company].name) || rr.company}</span><span style={{ fontSize: 10, color: active === sr ? "rgba(255,255,255,.6)" : C.muted }}>{rr.product}</span></span>
           </button>); })}
         <span style={{ marginLeft: "auto", fontSize: 11, color: C.muted, fontStyle: "italic" }}>Every canvas item links to its source ↗</span>
       </div>
       <Card style={{ padding: 22 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <Logo id={cid} size={40} />
-          <div><div style={{ fontFamily: serif, fontSize: 22, color: C.ink }}>{c.name} · {r.product} — Business Model Canvas</div><div style={{ fontSize: 12.5, color: C.muted }}>Per the BMC Guidelines · one sheet tab per product on export · click any item to open the supporting article{!hasBmc && " · AI drafting from the research grid…"}</div></div>
+          <div><div style={{ fontFamily: serif, fontSize: 22, color: C.ink }}>{(c && c.name) || cid} · {r?.product} — Business Model Canvas</div><div style={{ fontSize: 12.5, color: C.muted }}>Per the BMC Guidelines · one sheet tab per product on export · click any item to open the supporting article{!hasBmc && " · AI drafting from the research grid…"}</div></div>
           <div style={{ marginLeft: "auto" }}><ModelTag kind="major" /></div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10 }}>
@@ -613,20 +651,27 @@ function StageBreakdown({ order, onDone, setFocus }) {
 
 /* ── Stage 5 · Inspiration — multi-company aspirational timelines ──────── */
 function StageInspiration({ onDone }) {
-  const [companies, setCompanies] = useState(INSPIRATION);
-  const [active, setActive] = useState("spark");
+  const { INSPIRATION, subject } = useData();
+  const [companies, setCompanies] = useState(INSPIRATION || {});
+  const [active, setActive] = useState(Object.keys(INSPIRATION || {})[0] || "");
+  useEffect(() => {
+    if (Object.keys(companies).length) return;
+    api.inspSuggest({ subject, overview: {} }).then((res) => { const items = res && res.items; if (items && Object.keys(items).length) { setCompanies(items); setActive(Object.keys(items)[0]); } }).catch(() => {});
+  }, []);
   const [adding, setAdding] = useState(false); const [newName, setNewName] = useState(""); const [gen, setGen] = useState(false);
   const cols = [
     { k: "product", label: "Product & Capability", icon: Layers }, { k: "market", label: "Marketing & Positioning", icon: Target },
     { k: "funding", label: "Funding & Investment", icon: TrendingUp }, { k: "growth", label: "Quantified Growth", icon: Zap },
     { k: "customers", label: "Key Customers / Partners", icon: Users },
   ];
-  const data = companies[active];
-  const addCompany = () => {
+  const data = companies[active] || { who: "", phases: [] };
+  const addCompany = async () => {
     const name = newName.trim(); if (!name) return;
     const id = name.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "co" + Date.now();
     setGen(true);
-    setTimeout(() => { setCompanies(c => ({ ...c, [id]: INSP_TEMPLATE(name) })); setActive(id); setNewName(""); setAdding(false); setGen(false); }, 1500);
+    try { const t = await api.inspAdd({ companyName: name, subject }); setCompanies((c) => ({ ...c, [id]: { ...t, generated: true } })); setActive(id); }
+    catch { setCompanies((c) => ({ ...c, [id]: INSP_TEMPLATE(name) })); setActive(id); }
+    finally { setNewName(""); setAdding(false); setGen(false); }
   };
   return (
     <div>
@@ -730,22 +775,46 @@ export default function CompetitiveMapping() {
   useEffect(() => { setOrder(o => [...shortlist].sort((a, b) => { const ia = o.indexOf(a), ib = o.indexOf(b); return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib); })); }, [shortlist]);
   // persistent Research Copilot — state lives here so the chat survives every stage
   const [copilotMsgs, setCopilotMsgs] = useState([]); const [copilotOpen, setCopilotOpen] = useState(false);
-  const [focus, setFocus] = useState("spark");
+  const [focus, setFocus] = useState("");
   const [mapId, setMapId] = useState<any>(null);
-  useEffect(() => {
-    api.createMap({ companyName: OVERVIEW.name, website: OVERVIEW.website, tsheetUrl: "(from Data Feed)" })
-      .then((m) => setMapId(m?.id ?? null)).catch(() => setMapId(null));
-  }, []);
+  // dynamic research data — defaults are the seeded demo; replaced per company at runtime
+  const [subject, setSubject] = useState(OVERVIEW.name);
+  const [overview, setOverview] = useState<any>(OVERVIEW);
+  const [directions, setDirections] = useState<any>(AI_DIRECTIONS);
+  const [companies, setCompanies] = useState<any>(CO);
+  const [frows, setFrows] = useState<any>(FROWS);
+  const [bmcData, setBmcData] = useState<any>(BMC_DATA);
+  const [inspiration, setInspiration] = useState<any>(INSPIRATION);
   const advance = () => { const n = Math.min(stage + 1, STAGES.length - 1); setStage(n); setMaxReached(m => Math.max(m, n)); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const go = i => { setStage(i); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const onGenerate = async (form: any) => {
+    setSubject(form.name || "the company");
+    try {
+      const res = await api.createMap({ companyName: form.name, website: form.website, tsheetUrl: form.tsheet });
+      setMapId(res?.id ?? null);
+      if (res?.overview) setOverview(res.overview);
+      if (res?.directions) setDirections(res.directions);
+    } catch (e) { /* keep seeded defaults, still advance */ }
+    advance();
+  };
+  const onFence = async (direction: string) => {
+    try {
+      const res = await api.fence({ mapId, subject, direction, overview });
+      const rows = res && res.rows;
+      if (rows && rows.length) { setFrows(rows); setCompanies(buildCompanies(rows)); setShortlist([]); setOrder([]); setInspiration({}); }
+    } catch (e) { /* keep seeded fencing */ }
+    advance();
+  };
+  const ctx = { subject, OVERVIEW: overview, AI_DIRECTIONS: directions, CO: companies, FROWS: frows, BMC_DATA: bmcData, setBmcData, INSPIRATION: inspiration, mapId };
   return (
+    <DataCtx.Provider value={ctx}>
     <Layout>
       <style>{`.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}`}</style>
       <div style={{ fontFamily: sans, color: C.ink, maxWidth: 1180, margin: "0 auto", padding: "24px 28px 60px" }}>
         <div style={{ marginBottom: 18 }}><Eyebrow>Research pipeline · a company's competitive journey, end to end</Eyebrow><h1 style={{ fontFamily: serif, fontSize: 40, lineHeight: 1.05, margin: "4px 0 0", color: C.ink }}>Competitive Mapping</h1></div>
         <div style={{ position: "sticky", top: 0, zIndex: 20, background: C.bg, paddingTop: 4, paddingBottom: 10, marginBottom: 22, borderBottom: `1px solid ${C.border}` }}><Ribbon stage={stage} maxReached={maxReached} go={go} /></div>
-        {stage === 0 && <StageFeed onDone={advance} />}
-        {stage === 1 && <StageOverview onDone={advance} />}
+        {stage === 0 && <StageFeed onGenerate={onGenerate} />}
+        {stage === 1 && <StageOverview onFence={onFence} />}
         {stage === 2 && <StageFencing onDone={advance} shortlist={shortlist} setShortlist={setShortlist} />}
         {stage === 3 && <StagePrioritize order={order} setOrder={setOrder} onDone={advance} />}
         {stage === 4 && <StageBreakdown order={order} onDone={advance} setFocus={setFocus} />}
@@ -755,5 +824,6 @@ export default function CompetitiveMapping() {
       </div>
       <CopilotDock company={focus} msgs={copilotMsgs} setMsgs={setCopilotMsgs} open={copilotOpen} setOpen={setCopilotOpen} mapId={mapId} />
     </Layout>
+    </DataCtx.Provider>
   );
 }

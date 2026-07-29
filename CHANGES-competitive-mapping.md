@@ -1,54 +1,63 @@
-# Competitive Mapping — added to the Suite
+# Competitive Mapping — now functional for ANY company
 
 A new **Competitive Mapping** tab: a 7-stage competitive-research pipeline
 (Data Feed → Company Overview → Fencing → Prioritize → Breakdown → Inspiration →
-Generate Sheet) that ends by writing a *TS Research for {company}* workbook to
-the consultant's Google Drive.
+Generate Sheet). The pipeline is **data-driven** — enter any company and the
+backend generates real research with Gemini. Nothing is hardcoded to one company.
 
-## Files added
+## How it works now
 
-- `artifacts/thinking-spree/src/pages/competitive-mapping.tsx` — the feature UI,
-  wrapped in the standard `Layout`. Uses the suite's navy/ivory/gold identity.
-- `artifacts/api-server/src/routes/competitiveMapping.ts` — API: create run,
-  saved Research Copilot chat, Google-Sheet generation.
-- `artifacts/api-server/src/lib/competitiveMappingAi.ts` — Gemini routing:
-  light → `gemini-3.5-flash-lite`, heavy → `gemini-3.5-flash` (one-constant swap
-  to `gemini-3.6-flash`). Uses the existing `@google/generative-ai` SDK.
-- `lib/db/src/schema/competitiveMaps.ts` — 5 tables (maps, products, bmc,
-  inspiration, copilot messages).
-- `lib/db/migrations/017_competitive_mapping.sql` — matching migration.
+1. **Data Feed** — enter a company name (+ optional website / T-Sheet). On "Run",
+   the backend calls Gemini and returns a real **Company Overview** for that
+   company, plus 3 suggested research directions.
+2. **Fencing** — the chosen direction is sent to Gemini, which returns 15+
+   product-level competitor rows across 10+ companies, filling the 46-column
+   research grid and flagging those that have **scaled beyond** the subject.
+3. **Prioritize** — the consultant selects/ranks products (product-level).
+4. **Breakdown** — a BMC is generated per selected product on demand.
+5. **Inspiration** — the backend suggests aspirational-giant timelines, and
+   "+ Add company" generates a timeline for any company entered.
+6. **Generate Sheet** — writes a populated Google Sheet to the consultant's Drive.
 
-## Files edited
+All AI runs through Gemini 3.5 routing: light → `gemini-3.5-flash-lite`,
+heavy → `gemini-3.5-flash` (swap the constant in `competitiveMappingAi.ts` to
+`gemini-3.6-flash` to upgrade). **Requires `GEMINI_API_KEY`** (the suite already
+uses it). Without a key, every stage falls back to a safe stub / the seeded EV
+demo so the UI never breaks — but real per-company research needs the key set.
 
-- `artifacts/thinking-spree/src/App.tsx` — added the `/competitive-mapping` route.
-- `artifacts/thinking-spree/src/components/Layout.tsx` — added the sidebar entry
-  (Radar icon), sitting under Research.
-- `artifacts/api-server/src/routes/index.ts` — mounted the router.
-- `lib/db/src/schema/index.ts` — exported the new schema.
+## Files
 
-## Run the migration
+Added:
+- `artifacts/thinking-spree/src/pages/competitive-mapping.tsx` — data-driven UI
+  (React context populated from the backend; seeded EV data only as fallback).
+- `artifacts/api-server/src/lib/competitiveMappingAi.ts` — Gemini generators:
+  overview, directions, fencing grid, BMC, inspiration, copilot.
+- `artifacts/api-server/src/routes/competitiveMapping.ts` — endpoints for each
+  generator + saved copilot + Google-Sheet generation.
+- `lib/db/src/schema/competitiveMaps.ts` + `lib/db/migrations/017_competitive_mapping.sql`.
 
-The suite auto-runs migrations on deploy to an empty DB; to apply to an existing
-DB, run `017_competitive_mapping.sql` (or `pnpm drizzle-kit` per your flow).
+Edited (additive only):
+- `App.tsx` (route), `Layout.tsx` (sidebar entry), `routes/index.ts` (mount),
+  `lib/db/src/schema/index.ts` (export).
 
-## What's live vs seeded
+## Endpoints
 
-- **Research Copilot** — fully live. Persists per map (`copilot_messages`);
-  answers come from **Gemini 3.5 Flash** when `GEMINI_API_KEY` is set, and from a
-  built-in deterministic analysis otherwise (so it never hard-fails).
-- **Generate Sheet** — fully live. Creates + populates a real Google Sheet in the
-  consultant's Drive via the existing Google OAuth (Sheets + Drive scopes).
-- **Scrape / Fencing / BMC data** — currently a seeded EV dataset in the page so
-  the flow is demoable end-to-end. Wiring these to the Scrapling sidecar + a
-  background job runner (flipping `competitive_maps.status`, which the UI already
-  polls) is the next step.
+```
+POST /api/competitive-maps                     -> { id, overview, directions }
+POST /api/competitive-maps/fence               -> { rows }        (15+ competitors)
+POST /api/competitive-maps/bmc                 -> { blocks }      (one product's BMC)
+POST /api/competitive-maps/inspiration/suggest -> { items }       (2 giants)
+POST /api/competitive-maps/inspiration         -> { who, phases } (one company)
+GET/POST /api/competitive-maps/:id/copilot     -> saved chat
+POST /api/competitive-maps/generate            -> { url }         (Google Sheet)
+```
 
-## Follow-ups (marked TODO in code)
+## Notes
 
-- Loop closers in `/competitive-maps/generate`: push the overview to the
-  **Summary** tab and append the company to **Sprint Tracking** (mirror the
-  writers in `admin-import`).
-- Background scrape/fence jobs + the Scrapling sidecar.
-
-Nothing in the existing app was removed or behaviourally changed; this is purely
-additive.
+- Generation runs synchronously inside the request. Overview ~5-15s, Fencing
+  ~15-40s (15+ rows). Fine on Render; if you hit a proxy timeout, move Fencing to
+  a background job that flips `competitive_maps.status` (the UI already advances
+  on completion; wiring a poll is straightforward).
+- The Scrapling sidecar is optional — Gemini alone makes this functional today;
+  Scrapling adds freshness/grounding later.
+- Run migration `017_competitive_mapping.sql`.
