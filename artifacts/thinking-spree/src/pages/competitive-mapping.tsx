@@ -20,6 +20,14 @@ const jf = (path: string, opts: any = {}) =>
     .then((r) => { if (!r.ok) throw new Error(path + " " + r.status); return r.json(); });
 const api = {
   createMap: (b: any) => jf("/api/competitive-maps", { method: "POST", body: JSON.stringify(b) }),
+  listMaps: () => jf("/api/competitive-maps"),
+  loadMap: (id: any) => jf(`/api/competitive-maps/${id}`),
+  ingestDeck: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return fetch(BASE + "/api/competitive-maps/ingest-deck", { method: "POST", credentials: "include", body: fd })
+      .then((r) => { if (!r.ok) throw new Error("ingest-deck " + r.status); return r.json(); });
+  },
   loadCopilot: (id: any) => jf(`/api/competitive-maps/${id}/copilot`),
   askCopilot: (id: any, question: string, focusCompany: string) =>
     jf(`/api/competitive-maps/${id}/copilot`, { method: "POST", body: JSON.stringify({ question, focusCompany }) }),
@@ -256,7 +264,32 @@ function Btn({ children, onClick, variant = "primary", disabled, style }) {
 }
 function Card({ children, style }) { return <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, ...style }}>{children}</div>; }
 function Logo({ id, size = 34 }) { const { CO } = useData(); const c = CO[id] || { name: String(id || "?"), tint: hashTint(String(id)) }; return <div style={{ width: size, height: size, borderRadius: size * 0.26, background: c.tint, color: "#fff", display: "grid", placeItems: "center", fontFamily: serif, fontSize: size * 0.55, flexShrink: 0 }}>{c.name[0]}</div>; }
-function ModelTag({ kind }) { const lite = kind === "lite"; return <span title={lite ? "Light task → routed to Gemini 3.5 Flash-Lite" : "Heavy task → routed to Gemini 3.5 Flash"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 6, background: lite ? "#EEF4FB" : C.goldSoft, color: lite ? C.link : "#8A5A12", fontFamily: mono }}><Sparkles size={9} />{lite ? "3.5 Flash-Lite" : "3.5 Flash"}</span>; }
+function ModelTag({ kind }) { const lite = kind === "lite"; return <span title={lite ? "Light task → routed to Gemini 2.5 Flash-Lite" : "Heavy task → routed to Gemini 2.5 Flash"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 6, background: lite ? "#EEF4FB" : C.goldSoft, color: lite ? C.link : "#8A5A12", fontFamily: mono }}><Sparkles size={9} />{lite ? "2.5 Flash-Lite" : "2.5 Flash"}</span>; }
+/* Real scraped product image (og:image / logo). Falls back to the logo tile if
+   the URL is missing or fails to load, so the cell is never broken. */
+function ProductImage({ src, images, company }) {
+  const { CO } = useData();
+  // Build a de-duped, best-first candidate list from the ranked `images` array
+  // (scraped by Scrapling) with `src` as a fallback for older payloads.
+  const candidates = React.useMemo(() => {
+    const list = Array.isArray(images) ? images.slice() : [];
+    if (src && !list.includes(src)) list.unshift(src);
+    return list.filter(Boolean);
+  }, [images, src]);
+  const [idx, setIdx] = useState(0);
+  const tint = (CO[company]?.tint) || hashTint(String(company || ""));
+  const current = candidates[idx];
+  if (current) {
+    const isLogo = /logo\.clearbit\.com|s2\/favicons/i.test(current);
+    return <div style={{ position: "relative", height: 56, borderRadius: 7, overflow: "hidden", background: C.faint, border: `1px solid ${C.border}` }}>
+      <img src={current} alt={`${CO[company]?.name || company} product`} loading="lazy"
+        onError={() => setIdx((i) => i + 1)}
+        style={{ width: "100%", height: "100%", objectFit: isLogo ? "contain" : "cover" }} />
+      {isLogo && <span style={{ position: "absolute", bottom: 2, right: 4, fontSize: 8, color: C.muted }}>logo</span>}
+    </div>;
+  }
+  return <div style={{ position: "relative", height: 56, borderRadius: 7, background: `linear-gradient(135deg, ${tint}22, ${tint}08)`, display: "grid", placeItems: "center" }}><Logo id={company} size={26} /><span style={{ position: "absolute", bottom: 2, fontSize: 8, color: C.muted }}>logo</span></div>;
+}
 
 /* ── ribbon ────────────────────────────────────────────────────────────── */
 function Ribbon({ stage, maxReached, go }) {
@@ -283,10 +316,20 @@ function Ribbon({ stage, maxReached, go }) {
 }
 
 /* ── Stage 0 · Data Feed ───────────────────────────────────────────────── */
-function StageFeed({ onGenerate }) {
-  const [form, setForm] = useState({ name: "", website: "", tsheet: "", deck: null });
+function StageFeed({ onGenerate, onOpen }) {
+  const [form, setForm] = useState({ name: "", website: "", tsheet: "", deck: null, deckText: "" });
   const [running, setRunning] = useState(false); const [lines, setLines] = useState([]);
+  const [deckBusy, setDeckBusy] = useState(false); const deckRef = useRef(null);
+  const [saved, setSaved] = useState([]);
+  useEffect(() => { if (apiEnabled) api.listMaps().then(r => setSaved(r?.maps || [])).catch(() => {}); }, []);
   const canRun = form.name.trim() && form.tsheet.trim();
+  const onDeck = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setDeckBusy(true);
+    try { const r = await api.ingestDeck(file); setForm(f => ({ ...f, deck: file.name, deckText: r?.text || "" })); }
+    catch { setForm(f => ({ ...f, deck: file.name, deckText: "" })); }
+    finally { setDeckBusy(false); }
+  };
   const host = (form.website || form.name || "company").replace(/^https?:\/\//, "").split("/")[0];
   const script = [`fetch(${host}) — resolving`, "extracting product lines …", "pricing + revenue signals …", "traction & press mentions …", "reading T-Sheet tabs …", "parsing pitch PDF …", "assemble › generating Company Overview ✓"];
   const run = async () => {
@@ -299,6 +342,8 @@ function StageFeed({ onGenerate }) {
       <input value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })} placeholder={ph} style={{ width: "100%", padding: "11px 13px", borderRadius: 9, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: sans, outline: "none", boxSizing: "border-box" }} /></div>
   );
   return (
+    <>
+    {onOpen && <SavedRuns saved={saved} onOpen={onOpen} />}
     <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 22 }}>
       <Card style={{ padding: 26 }}>
         <Eyebrow>Intake</Eyebrow>
@@ -308,7 +353,8 @@ function StageFeed({ onGenerate }) {
           {field("Website link", "website", "https:// (optional)", false, <Globe size={14} color={C.muted} />)}
           {field("T-Sheet link", "tsheet", "Google Sheet URL", true, <Link2 size={14} color={C.muted} />)}
           <div><label style={{ fontSize: 12.5, fontWeight: 600, color: C.ink, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}><FileText size={14} color={C.muted} />Pitch deck (PDF)</label>
-            <div onClick={() => setForm({ ...form, deck: "Quint_PitchDeck.pdf" })} style={{ border: `1.5px dashed ${C.border}`, borderRadius: 10, padding: 18, textAlign: "center", cursor: "pointer", color: C.muted, fontSize: 13, background: C.faint }}>{form.deck ? <span style={{ color: C.success, fontWeight: 600 }}><Check size={14} style={{ display: "inline", marginRight: 6 }} />{form.deck}</span> : "Drop PDF or click to attach"}</div></div>
+            <input ref={deckRef} type="file" accept="application/pdf,.pdf,.docx" onChange={onDeck} style={{ display: "none" }} />
+            <div onClick={() => !deckBusy && deckRef.current?.click()} style={{ border: `1.5px dashed ${C.border}`, borderRadius: 10, padding: 18, textAlign: "center", cursor: deckBusy ? "wait" : "pointer", color: C.muted, fontSize: 13, background: C.faint }}>{deckBusy ? <span style={{ color: C.muted }}><Loader2 size={14} className="spin" style={{ display: "inline", marginRight: 6 }} />Extracting deck…</span> : form.deck ? <span style={{ color: C.success, fontWeight: 600 }}><Check size={14} style={{ display: "inline", marginRight: 6 }} />{form.deck}{form.deckText ? "" : " (no text found)"}</span> : "Click to attach a PDF / DOCX"}</div></div>
         </div>
         <div style={{ marginTop: 22 }}><Btn variant="gold" onClick={run} disabled={!canRun || running} style={{ width: "100%", justifyContent: "center" }}>{running ? <><Loader2 size={16} className="spin" /> Scraping…</> : <><Zap size={16} /> Run Scrapling</>}</Btn>
           {!canRun && <p style={{ fontSize: 11.5, color: C.muted, marginTop: 8, textAlign: "center" }}>Company name and T-Sheet link are required to start.</p>}</div>
@@ -322,6 +368,35 @@ function StageFeed({ onGenerate }) {
         </div>
       </Card>
     </div>
+    </>
+  );
+}
+
+/* ── Saved research — revisit any company a consultant has researched ───── */
+function SavedRuns({ saved, onOpen }) {
+  if (!saved || !saved.length) return null;
+  const statusLabel = { overview_ready: "Overview", fenced: "Fenced", prioritized: "Prioritized", broken_down: "Breakdown", inspiration: "Inspiration", generated: "Sheet ready", scraping: "Scraping" };
+  return (
+    <Card style={{ padding: 20, marginBottom: 22 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <FileSpreadsheet size={16} color={C.gold} />
+        <span style={{ fontWeight: 700, color: C.ink, fontSize: 14 }}>Your saved research</span>
+        <span style={{ fontSize: 12, color: C.muted }}>· {saved.length} compan{saved.length === 1 ? "y" : "ies"} · click to reopen</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10 }}>
+        {saved.map((m) => (
+          <button key={m.id} onClick={() => onOpen(m.id)} style={{ textAlign: "left", border: `1px solid ${C.border}`, borderRadius: 11, padding: "12px 14px", background: C.card, cursor: "pointer", display: "flex", gap: 11, alignItems: "center" }}>
+            {m.logo ? <img src={m.logo} alt="" onError={(e) => { e.currentTarget.style.display = "none"; }} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", background: C.faint, flexShrink: 0 }} />
+              : <div style={{ width: 34, height: 34, borderRadius: 8, background: hashTint(m.companyName), color: "#fff", display: "grid", placeItems: "center", fontFamily: serif, fontSize: 18, flexShrink: 0 }}>{(m.companyName || "?")[0]}</div>}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 13.5, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.companyName}</div>
+              <div style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{statusLabel[m.status] || m.status}{m.updatedAt ? ` · ${new Date(m.updatedAt).toLocaleDateString()}` : ""}</div>
+            </div>
+            {m.sheetUrl && <ExternalLink size={13} color={C.muted} />}
+          </button>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -419,10 +494,11 @@ function FencingDrawer({ rowData, onClose, inList, toggle, addAllCompany }) {
   );
 }
 function StageFencing({ onDone, shortlist, setShortlist }) {
-  const { CO, FROWS } = useData();
+  const { CO, FROWS, subject } = useData();
+  const subj = subject || "the company";
   const [q, setQ] = useState(""); const [seg, setSeg] = useState("all"); const [scaled, setScaled] = useState(false); const [open, setOpen] = useState(null);
   const rows = FROWS
-    .filter(r => (seg === "all" || r.segD === seg) && (!scaled || isScaled(r)) && (CO[r.company].name.toLowerCase().includes(q.toLowerCase()) || r.product.toLowerCase().includes(q.toLowerCase())))
+    .filter(r => (seg === "all" || r.segD === seg) && (!scaled || isScaled(r)) && ((CO[r.company]?.name || r.company || "").toLowerCase().includes(q.toLowerCase()) || (r.product || "").toLowerCase().includes(q.toLowerCase())))
     .sort((a, b) => (isScaled(b) ? 1 : 0) - (isScaled(a) ? 1 : 0)); // scaled-beyond first
   const inList = sr => shortlist.includes(sr);
   const toggle = sr => setShortlist(p => p.includes(sr) ? p.filter(x => x !== sr) : [...p, sr]);
@@ -432,7 +508,7 @@ function StageFencing({ onDone, shortlist, setShortlist }) {
   return (
     <div>
       <Card style={{ padding: "16px 20px", marginBottom: 14, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-        <div style={{ maxWidth: 620 }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontWeight: 700, color: C.ink, fontSize: 15 }}>Every player solving Quint's problem — in one place</span><ModelTag kind="major" /></div><div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>{FROWS.length} products · {nCompanies} companies · <b style={{ color: C.success }}>{nScaled} scaled beyond us</b>. Goal: miss nothing, then keep the ones that have out-scaled Quint. Select at the <b>product</b> level — one product or a whole company. Click a row for the full profile.</div></div>
+        <div style={{ maxWidth: 620 }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontWeight: 700, color: C.ink, fontSize: 15 }}>Every player solving {subj}'s problem — in one place</span><ModelTag kind="major" /></div><div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>{FROWS.length} products · {nCompanies} companies · <b style={{ color: C.success }}>{nScaled} scaled beyond us</b>. Goal: miss nothing, then keep the ones that have out-scaled {subj}. Select at the <b>product</b> level — one product or a whole company. Click a row for the full profile.</div></div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, border: `1px solid ${C.border}`, borderRadius: 9, padding: "7px 11px", background: C.card }}><Search size={14} color={C.muted} /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter…" style={{ border: "none", outline: "none", fontSize: 13, fontFamily: sans, width: 110 }} /></div>
           {["all", "B2B", "B2C"].map(s => <button key={s} onClick={() => setSeg(s)} style={{ fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 8, cursor: "pointer", border: seg === s ? "none" : `1px solid ${C.border}`, background: seg === s ? C.navy : C.card, color: seg === s ? "#fff" : C.ink }}>{s === "all" ? "All" : s}</button>)}
@@ -474,9 +550,9 @@ function StageFencing({ onDone, shortlist, setShortlist }) {
                     const bg = sticky ? rowBg : undefined;
                     return <td key={c.k} style={{ position: sticky ? "sticky" : "static", left: sticky ? 76 + c.sticky : undefined, zIndex: sticky ? 4 : 1, background: bg, borderRight: `1px solid ${C.faint}`, borderBottom: `1px solid ${C.border}`, minWidth: c.w, maxWidth: c.w, padding: "9px 9px", verticalAlign: "top" }}>
                       {c.k === "sr" ? <span style={{ fontFamily: serif, fontSize: 15, color: C.muted }}>{r.sr}</span>
-                        : c.k === "company" ? <div style={{ display: "flex", alignItems: "center", gap: 7 }}><Logo id={r.company} size={22} /><div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}><span style={{ fontSize: 12, fontWeight: 600, color: C.ink }}>{CO[r.company].name}{CO[r.company].star && <span style={{ fontSize: 9, color: C.gold, marginLeft: 3 }}>★</span>}</span>{big && <span style={{ fontSize: 8.5, fontWeight: 700, color: C.success }}>▲ scaled beyond us</span>}</div></div>
+                        : c.k === "company" ? <div style={{ display: "flex", alignItems: "center", gap: 7 }}><Logo id={r.company} size={22} /><div style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}><span style={{ fontSize: 12, fontWeight: 600, color: C.ink }}>{CO[r.company]?.name || r.company}{CO[r.company]?.star && <span style={{ fontSize: 9, color: C.gold, marginLeft: 3 }}>★</span>}</span>{big && <span style={{ fontSize: 8.5, fontWeight: 700, color: C.success }}>▲ scaled beyond us</span>}</div></div>
                           : c.k === "product" ? <span style={{ fontSize: 12, fontWeight: 600, color: C.navy }}>{r.product}</span>
-                            : c.k === "image" ? <div style={{ position: "relative", height: 56, borderRadius: 7, background: `linear-gradient(135deg, ${CO[r.company].tint}22, ${CO[r.company].tint}08)`, display: "grid", placeItems: "center" }}><Logo id={r.company} size={26} /><span style={{ position: "absolute", bottom: 2, fontSize: 8, color: C.muted }}>capture</span></div>
+                            : c.k === "image" ? <ProductImage src={r.image || r.imageUrl} images={r.images} company={r.company} />
                               : c.k === "segD" || c.k === "segS" ? (r[c.k] && r[c.k] !== NA ? <SegTag seg={r[c.k]} /> : <CellText v={NA} />)
                                 : <CellText v={r[c.k]} />}
                     </td>;
@@ -499,17 +575,18 @@ function StageFencing({ onDone, shortlist, setShortlist }) {
 
 /* ── Stage 3 · Prioritize ──────────────────────────────────────────────── */
 function StagePrioritize({ order, setOrder, onDone }) {
-  const { CO, FROWS } = useData();
+  const { CO, FROWS, subject } = useData();
+  const subj = subject || "the company";
   const move = (i, dir) => { const j = i + dir; if (j < 0 || j >= order.length) return; const n = [...order]; [n[i], n[j]] = [n[j], n[i]]; setOrder(n); };
   return (
     <div style={{ maxWidth: 760, margin: "0 auto" }}>
-      <Card style={{ padding: 20, marginBottom: 16, background: "#FFFDF8", border: `1px solid ${C.goldSoft}` }}><div style={{ display: "flex", gap: 10, alignItems: "center" }}><ListOrdered size={18} color={C.gold} /><div><div style={{ fontWeight: 700, color: C.ink }}>Rank your deep-dive order</div><div style={{ fontSize: 12.5, color: C.muted }}>Breakdown builds a full BMC for each selected product, in this order. Put the products that out-scaled Quint first; drop anything below Quint's journey.</div></div></div></Card>
+      <Card style={{ padding: 20, marginBottom: 16, background: "#FFFDF8", border: `1px solid ${C.goldSoft}` }}><div style={{ display: "flex", gap: 10, alignItems: "center" }}><ListOrdered size={18} color={C.gold} /><div><div style={{ fontWeight: 700, color: C.ink }}>Rank your deep-dive order</div><div style={{ fontSize: 12.5, color: C.muted }}>Breakdown builds a full BMC for each selected product, in this order. Put the products that out-scaled {subj} first; drop anything below {subj}'s journey.</div></div></div></Card>
       <div style={{ display: "grid", gap: 10 }}>
         {order.map((sr, i) => { const r = FROWS.find(x => x.sr === sr); if (!r) return null; const big = isScaled(r); return (
         <Card key={sr} style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ width: 34, height: 34, borderRadius: 9, background: i < 3 ? C.gold : C.faint, color: i < 3 ? "#241a06" : C.muted, display: "grid", placeItems: "center", fontFamily: serif, fontSize: 19, fontWeight: 700 }}>{i + 1}</div>
           <Logo id={r.company} size={34} />
-          <div style={{ flex: 1 }}><div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 700, color: C.ink }}>{CO[r.company].name}</span><span style={{ fontSize: 12.5, color: C.navy, fontWeight: 600 }}>· {r.product}</span>{CO[r.company].star && <span style={{ fontSize: 10, color: C.gold, fontWeight: 700 }}>★ analog</span>}{big && <span style={{ fontSize: 10, color: C.success, fontWeight: 700 }}>▲ scaled beyond us</span>}</div><div style={{ fontSize: 11.5, color: C.muted }}>{r.estRev !== NA ? `Est. revenue ${r.estRev}` : ""}{r.valuation !== NA ? ` · Val ₹${r.valuation} Cr` : ""}</div></div>
+          <div style={{ flex: 1 }}><div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 700, color: C.ink }}>{CO[r.company]?.name || r.company}</span><span style={{ fontSize: 12.5, color: C.navy, fontWeight: 600 }}>· {r.product}</span>{CO[r.company].star && <span style={{ fontSize: 10, color: C.gold, fontWeight: 700 }}>★ analog</span>}{big && <span style={{ fontSize: 10, color: C.success, fontWeight: 700 }}>▲ scaled beyond us</span>}</div><div style={{ fontSize: 11.5, color: C.muted }}>{r.estRev !== NA ? `Est. revenue ${r.estRev}` : ""}{r.valuation !== NA ? ` · Val ₹${r.valuation} Cr` : ""}</div></div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}><button onClick={() => move(i, -1)} style={{ border: `1px solid ${C.border}`, background: C.card, borderRadius: 6, padding: 4, cursor: "pointer" }}><ArrowUp size={14} color={C.ink} /></button><button onClick={() => move(i, 1)} style={{ border: `1px solid ${C.border}`, background: C.card, borderRadius: 6, padding: 4, cursor: "pointer" }}><ArrowDown size={14} color={C.ink} /></button></div>
         </Card>);})}
       </div>
@@ -522,23 +599,24 @@ function StagePrioritize({ order, setOrder, onDone }) {
 /* Persistent, dockable Research Copilot. State (msgs) is owned by the shell so
    the conversation survives every stage change — "saved throughout". In the
    real build msgs persist to a copilot_messages table keyed to the map id. */
-function answerFor(name) {
+function answerFor(name, subject = "the subject company") {
   return [
-    { h: "Positioning read", b: `${name} anchors on a fixed / networked model, which gives it density and brand trust but ties growth to site acquisition and grid readiness. Quint's portable, deploy-in-days wedge is orthogonal — it competes on time-to-charge and OpEx flexibility, not footprint. The sharpest contrast is capital intensity: ${name} scales with sites, Quint scales with units it can redeploy.` },
-    { h: "Unit economics", b: `${name}'s revenue per point is gated by utilisation at a fixed location; below ~40–50% utilisation the site is underwater. Quint sidesteps stranded-asset risk because a portable unit chases demand across depots. The trade: Quint carries battery-cycle + logistics cost that ${name} doesn't, so at very high utilisation a fixed asset wins on margin. The crossover is the number to model.` },
-    { h: "Where Quint can press", b: `Segments where ${name} is structurally weak: (1) new depots waiting on grid upgrades, (2) temporary / event demand, (3) roadside rescue. These are exactly where fixed infra can't follow. Lead every ${name}-contested deal with a "no grid upgrade, live this week" framing.` },
-    { h: "Risk & watch-items", b: `If ${name} launches or acquires a mobile line, Quint's moat compresses fast — track their R&D and M&A signals. Also watch cell-cost curves: cheaper cells help Quint's portable BOM more than they help ${name}'s fixed sites.` },
+    { h: "Positioning read", b: `${name} and ${subject} differ most in where they place their strategic bet. Map each on capital intensity and go-to-market motion — that contrast usually explains who wins which segment.` },
+    { h: "Unit economics", b: `Model the utilisation / cost crossover between ${name} and ${subject}. Below the crossover, the lighter-asset model wins; above it, scale and density favour the incumbent. That single number frames most of the decision.` },
+    { h: `Where ${subject} can press`, b: `Attack the segments ${name} is structurally slow to serve, and lead every contested deal with that framing. Speed, flexibility, and coverage gaps are the usual openings.` },
+    { h: "Risk & watch-items", b: `Track ${name}'s R&D and M&A for moves into ${subject}'s wedge — that is the fastest way the advantage erodes. Watch cost-curve shifts that change either side's economics.` },
   ];
 }
 function CopilotDock({ company, msgs, setMsgs, open, setOpen, mapId }) {
-  const { CO } = useData();
+  const { CO, subject } = useData();
   const [input, setInput] = useState(""); const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
   const name = CO[company]?.name || "the market";
+  const subj = subject || "the company";
   const suggestions = [
-    `How does ${name}'s unit economics compare with Quint's portable model?`,
-    `Where is ${name} most vulnerable that Quint could exploit?`,
-    `What's the state of the India EV-charging market Quint is entering?`,
+    `How do ${name}'s unit economics compare with ${subj}'s model?`,
+    `Where is ${name} most vulnerable that ${subj} could exploit?`,
+    `What's the state of the market ${subj} is entering, and who leads it?`,
   ];
   // load saved history once (if a backend is configured)
   useEffect(() => {
@@ -556,7 +634,7 @@ function CopilotDock({ company, msgs, setMsgs, open, setOpen, mapId }) {
         setMsgs(m => [...m, { role: "ai", blocks }]); setBusy(false); return;
       } catch { /* fall through to local */ }
     }
-    setTimeout(() => { setMsgs(m => [...m, { role: "ai", blocks: answerFor(name) }]); setBusy(false); }, 1400);
+    setTimeout(() => { setMsgs(m => [...m, { role: "ai", blocks: answerFor(name, subj) }]); setBusy(false); }, 1400);
   };
   useEffect(() => { if (open) endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, busy, open]);
   if (!open) return (
@@ -651,12 +729,12 @@ function StageBreakdown({ order, onDone, setFocus }) {
 
 /* ── Stage 5 · Inspiration — multi-company aspirational timelines ──────── */
 function StageInspiration({ onDone }) {
-  const { INSPIRATION, subject } = useData();
+  const { INSPIRATION, subject, OVERVIEW, mapId } = useData();
   const [companies, setCompanies] = useState(INSPIRATION || {});
   const [active, setActive] = useState(Object.keys(INSPIRATION || {})[0] || "");
   useEffect(() => {
     if (Object.keys(companies).length) return;
-    api.inspSuggest({ subject, overview: {} }).then((res) => { const items = res && res.items; if (items && Object.keys(items).length) { setCompanies(items); setActive(Object.keys(items)[0]); } }).catch(() => {});
+    api.inspSuggest({ subject, overview: OVERVIEW || {} }).then((res) => { const items = res && res.items; if (items && Object.keys(items).length) { setCompanies(items); setActive(Object.keys(items)[0]); } }).catch(() => {});
   }, []);
   const [adding, setAdding] = useState(false); const [newName, setNewName] = useState(""); const [gen, setGen] = useState(false);
   const cols = [
@@ -669,14 +747,14 @@ function StageInspiration({ onDone }) {
     const name = newName.trim(); if (!name) return;
     const id = name.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "co" + Date.now();
     setGen(true);
-    try { const t = await api.inspAdd({ companyName: name, subject }); setCompanies((c) => ({ ...c, [id]: { ...t, generated: true } })); setActive(id); }
+    try { const t = await api.inspAdd({ companyName: name, subject, mapId }); setCompanies((c) => ({ ...c, [id]: { ...t, generated: true } })); setActive(id); }
     catch { setCompanies((c) => ({ ...c, [id]: INSP_TEMPLATE(name) })); setActive(id); }
     finally { setNewName(""); setAdding(false); setGen(false); }
   };
   return (
     <div>
       <Card style={{ padding: 20, marginBottom: 16, background: "#FFFDF8", border: `1px solid ${C.goldSoft}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Route size={18} color={C.gold} /><div style={{ flex: 1 }}><div style={{ fontWeight: 700, color: C.ink }}>Who does Quint want to become?</div><div style={{ fontSize: 12.5, color: C.muted }}>Big players who ran the same route over 4–5 years. Study their climb — add any company you want a journey for.</div></div><ModelTag kind="major" /></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Route size={18} color={C.gold} /><div style={{ flex: 1 }}><div style={{ fontWeight: 700, color: C.ink }}>Who does {subject || "the company"} want to become?</div><div style={{ fontSize: 12.5, color: C.muted }}>Big players who ran the same route over 4–5 years. Study their climb — add any company you want a journey for.</div></div><ModelTag kind="major" /></div>
       </Card>
 
       {/* company tabs + add */}
@@ -709,7 +787,7 @@ function StageInspiration({ onDone }) {
           ))}
         </div>
       </div>
-      {data.generated && <p style={{ fontSize: 11.5, color: C.muted, fontStyle: "italic", marginTop: 12 }}>Draft timeline generated for {data.who} — Scrapling + Gemini will replace with sourced, dated facts on the live run.</p>}
+      {data.generated && <p style={{ fontSize: 11.5, color: C.muted, fontStyle: "italic", marginTop: 12 }}>Timeline for {data.who}, generated by Scrapling + Gemini from sourced facts.</p>}
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 18 }}><Btn variant="gold" onClick={onDone}><FileSpreadsheet size={16} /> Review & generate sheet</Btn></div>
     </div>
   );
@@ -717,17 +795,20 @@ function StageInspiration({ onDone }) {
 
 /* ── Stage 6 · Generate ────────────────────────────────────────────────── */
 function StageGenerate({ order, mapId }) {
+  // Read the LIVE per-company research from context — never the seeded demo.
+  const { subject, OVERVIEW, CO, FROWS, BMC_DATA, INSPIRATION } = useData();
+  const coName = (id) => CO[id]?.name || id;
   const [state, setState] = useState("idle"); const [built, setBuilt] = useState([]);
-  const bmcTabs = order.map(sr => FROWS.find(r => r.sr === sr)).filter(Boolean).map(r => `BMC — ${CO[r.company].name} · ${r.product}`);
+  const bmcTabs = order.map(sr => FROWS.find(r => r.sr === sr)).filter(Boolean).map(r => `BMC — ${coName(r.company)} · ${r.product}`);
   const tabs = ["Company Overview", "Industry Decoding (Fencing)", "Competitive Mapping (PODPOS)", ...bmcTabs, "Inspiration Journey"];
   const buildPayload = () => {
     const rows = order.map(sr => FROWS.find(r => r.sr === sr)).filter(Boolean);
     return {
-      companyName: OVERVIEW.name,
+      companyName: subject || OVERVIEW.name,
       overview: OVERVIEW,
       columns: FCOLS.map(c => ({ key: c.k, label: c.label })),
       fencing: FROWS,
-      selected: rows.map(r => ({ company: CO[r.company].name, product: r.product, bmc: BMC_DATA[r.company] || null, data: r })),
+      selected: rows.map(r => ({ company: coName(r.company), product: r.product, bmc: BMC_DATA[r.company] || null, data: r })),
       inspiration: Object.values(INSPIRATION),
     };
   };
@@ -747,10 +828,10 @@ function StageGenerate({ order, mapId }) {
     <Card style={{ padding: 34, textAlign: "center", maxWidth: 620, margin: "0 auto" }}>
       <div style={{ width: 58, height: 58, borderRadius: 16, background: C.success, display: "grid", placeItems: "center", margin: "0 auto 14px" }}><Check size={30} color="#fff" strokeWidth={3} /></div>
       <h2 style={{ fontFamily: serif, fontSize: 27, color: C.ink, margin: "0 0 6px" }}>Sheet generated</h2>
-      <p style={{ color: C.muted, fontSize: 14, margin: "0 0 18px" }}><b style={{ color: C.ink }}>TS Research for Quintinno Labs</b> is in your Google Drive with {tabs.length} tabs.</p>
+      <p style={{ color: C.muted, fontSize: 14, margin: "0 0 18px" }}><b style={{ color: C.ink }}>TS Research for {subject || OVERVIEW.name}</b> is in your Google Drive with {tabs.length} tabs.</p>
       <a href={sheetUrl || "#"} target="_blank" rel="noreferrer" onClick={e => { if (!sheetUrl) e.preventDefault(); }} style={{ display: "inline-flex", alignItems: "center", gap: 8, background: C.navy, color: "#fff", padding: "11px 20px", borderRadius: 10, textDecoration: "none", fontWeight: 600, fontSize: 14 }}><FileSpreadsheet size={16} /> Open in Google Sheets <ExternalLink size={14} /></a>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 7, justifyContent: "center", marginTop: 22 }}>{tabs.map(t => <span key={t} style={{ fontSize: 11.5, background: C.faint, border: `1px solid ${C.border}`, color: C.ink, padding: "4px 10px", borderRadius: 7 }}>{t}</span>)}</div>
-      <p style={{ fontSize: 12, color: C.muted, marginTop: 18 }}>Summary pushed to the <b>Summary</b> tab · Quintinno Labs added to <b>Sprint Tracking</b>.</p>
+      <p style={{ fontSize: 12, color: C.muted, marginTop: 18 }}>Summary pushed to the <b>Summary</b> tab · {subject || OVERVIEW.name} added to <b>Sprint Tracking</b>.</p>
     </Card>
   );
   return (
@@ -759,7 +840,7 @@ function StageGenerate({ order, mapId }) {
         <div style={{ display: "grid", gap: 8 }}>{tabs.map((t, i) => { const done = built.includes(t); return <div key={t} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 9, background: done ? "#F0F8F3" : C.faint, border: `1px solid ${done ? "#BFE3CE" : C.border}` }}><span style={{ width: 20, height: 20, borderRadius: 6, background: done ? C.success : C.card, border: done ? "none" : `1px solid ${C.border}`, display: "grid", placeItems: "center" }}>{done ? <Check size={12} color="#fff" /> : <span style={{ fontSize: 10, color: C.muted }}>{i + 1}</span>}</span><span style={{ fontSize: 13, color: C.ink, fontWeight: done ? 600 : 500 }}>{t}</span></div>; })}</div>
       </Card>
       <Card style={{ padding: 24, display: "flex", flexDirection: "column" }}><Eyebrow>Destination</Eyebrow><h2 style={{ fontFamily: serif, fontSize: 24, color: C.ink, margin: "4px 0 14px" }}>Google Drive</h2>
-        <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.7 }}><div>File name · <b>TS Research for Quintinno Labs</b></div><div>Format · mirrors the <i>Copy of Research-EV</i> layout</div><div>Owner · your connected Workspace account</div><div style={{ marginTop: 10, color: C.muted, fontSize: 12.5 }}>The Overview summary also updates the app's <b>Summary</b> tab, and the company is appended to <b>Sprint Tracking</b>.</div></div>
+        <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.7 }}><div>File name · <b>TS Research for {subject || OVERVIEW.name}</b></div><div>Format · mirrors the <i>Copy of Research-EV</i> layout</div><div>Owner · your connected Workspace account</div><div style={{ marginTop: 10, color: C.muted, fontSize: 12.5 }}>The Overview summary also updates the app's <b>Summary</b> tab, and the company is appended to <b>Sprint Tracking</b>.</div></div>
         <div style={{ marginTop: "auto", paddingTop: 20 }}><Btn variant="gold" onClick={run} disabled={state === "running"} style={{ width: "100%", justifyContent: "center" }}>{state === "running" ? <><Loader2 size={16} className="spin" /> Writing tabs…</> : <><FileSpreadsheet size={16} /> Generate Sheet</>}</Btn></div>
       </Card>
     </div>
@@ -790,7 +871,7 @@ export default function CompetitiveMapping() {
   const onGenerate = async (form: any) => {
     setSubject(form.name || "the company");
     try {
-      const res = await api.createMap({ companyName: form.name, website: form.website, tsheetUrl: form.tsheet });
+      const res = await api.createMap({ companyName: form.name, website: form.website, tsheetUrl: form.tsheet, deckText: form.deckText });
       setMapId(res?.id ?? null);
       if (res?.overview) setOverview(res.overview);
       if (res?.directions) setDirections(res.directions);
@@ -805,6 +886,22 @@ export default function CompetitiveMapping() {
     } catch (e) { /* keep seeded fencing */ }
     advance();
   };
+  // Reopen a previously saved run: hydrate context from the backend, then jump in.
+  const revisit = async (id: any) => {
+    try {
+      const run = await api.loadMap(id);
+      setMapId(run?.id ?? id);
+      setSubject(run?.companyName || run?.overview?.name || "the company");
+      if (run?.overview) setOverview(run.overview);
+      const rows = Array.isArray(run?.rows) ? run.rows : [];
+      if (rows.length) { setFrows(rows); setCompanies(buildCompanies(rows)); } else { setFrows([]); setCompanies({}); }
+      setInspiration(run?.inspiration && Object.keys(run.inspiration).length ? run.inspiration : {});
+      setShortlist([]); setOrder([]);
+      const target = rows.length ? 2 : 1;      // land on Fencing if we have rows, else Overview
+      setStage(target); setMaxReached(Math.max(target, rows.length ? 5 : 1));
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) { /* stay on Data Feed */ }
+  };
   const ctx = { subject, OVERVIEW: overview, AI_DIRECTIONS: directions, CO: companies, FROWS: frows, BMC_DATA: bmcData, setBmcData, INSPIRATION: inspiration, mapId };
   return (
     <DataCtx.Provider value={ctx}>
@@ -813,7 +910,7 @@ export default function CompetitiveMapping() {
       <div style={{ fontFamily: sans, color: C.ink, maxWidth: 1180, margin: "0 auto", padding: "24px 28px 60px" }}>
         <div style={{ marginBottom: 18 }}><Eyebrow>Research pipeline · a company's competitive journey, end to end</Eyebrow><h1 style={{ fontFamily: serif, fontSize: 40, lineHeight: 1.05, margin: "4px 0 0", color: C.ink }}>Competitive Mapping</h1></div>
         <div style={{ position: "sticky", top: 0, zIndex: 20, background: C.bg, paddingTop: 4, paddingBottom: 10, marginBottom: 22, borderBottom: `1px solid ${C.border}` }}><Ribbon stage={stage} maxReached={maxReached} go={go} /></div>
-        {stage === 0 && <StageFeed onGenerate={onGenerate} />}
+        {stage === 0 && <StageFeed onGenerate={onGenerate} onOpen={revisit} />}
         {stage === 1 && <StageOverview onFence={onFence} />}
         {stage === 2 && <StageFencing onDone={advance} shortlist={shortlist} setShortlist={setShortlist} />}
         {stage === 3 && <StagePrioritize order={order} setOrder={setOrder} onDone={advance} />}

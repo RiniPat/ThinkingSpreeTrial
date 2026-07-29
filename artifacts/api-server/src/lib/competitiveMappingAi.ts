@@ -1,20 +1,24 @@
 /**
  * Competitive Mapping AI helpers — generates real research for ANY company.
  *
- * Model routing:
- *   light tasks  -> gemini-3.5-flash-lite   (directions)
- *   heavy tasks  -> gemini-3.5-flash        (overview, fencing, BMC, inspiration, copilot)
- *   (swap MODEL_HEAVY to "gemini-3.6-flash" to upgrade quality + cost)
+ * Model routing (v5.22 fix):
+ *   light tasks  -> gemini-2.5-flash-lite   (directions)
+ *   heavy tasks  -> gemini-2.5-flash        (overview, fencing, BMC, inspiration, copilot)
  *
- * Uses the suite's existing @google/generative-ai SDK. Every generator returns
- * strict JSON in the exact shape the front-end renders, and falls back to a
- * safe stub if the key is missing or the model misbehaves, so the UI never
- * hard-fails.
+ * IMPORTANT: earlier builds pointed at "gemini-3.5-flash" / "gemini-3.6-flash",
+ * which DO NOT EXIST — so every call threw and silently fell back to a stub,
+ * which is why the UI kept showing the seeded Quintinno EV demo. We now use the
+ * same models the rest of the suite uses, allow an env override, and if a model
+ * name is ever rejected we retry once on a known-good model before falling back.
+ *
+ * Every generator returns strict JSON in the exact shape the front-end renders.
  */
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-export const MODEL_LITE = "gemini-3.5-flash-lite";
-export const MODEL_HEAVY = "gemini-3.5-flash";
+// Override via env if you want to upgrade later (e.g. CM_MODEL_HEAVY=gemini-2.5-pro)
+export const MODEL_HEAVY = process.env.CM_MODEL_HEAVY?.trim() || "gemini-2.5-flash";
+export const MODEL_LITE = process.env.CM_MODEL_LITE?.trim() || "gemini-2.5-flash-lite";
+const MODEL_SAFE = "gemini-2.5-flash"; // known-good retry target
 
 export function isConfigured(): boolean {
   return Boolean(process.env.GEMINI_API_KEY?.trim());
@@ -38,26 +42,66 @@ function parseJson<T>(text: string, fallback: T): T {
   }
 }
 
+function looksLikeBadModel(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return m.includes("not found") || m.includes("404") || m.includes("unsupported") ||
+    m.includes("permission") || m.includes("does not exist") || m.includes("invalid model");
+}
+
+async function callOnce(model: string, text: string): Promise<string> {
+  const m = getModel(model);
+  const res = await m.generateContent(text);
+  return res.response.text();
+}
+
 async function gen<T>(opts: { model: string; system: string; prompt: string; fallback: T }): Promise<T> {
   if (!isConfigured()) return opts.fallback;
+  const payload = `${opts.system}\n\n${opts.prompt}`;
   try {
-    const m = getModel(opts.model);
-    const res = await m.generateContent(`${opts.system}\n\n${opts.prompt}`);
-    const out = parseJson<T | null>(res.response.text(), null as any);
+    const out = parseJson<T | null>(await callOnce(opts.model, payload), null as any);
     return (out ?? opts.fallback) as T;
   } catch (e) {
-    console.warn("[competitiveMappingAi] generation failed, using fallback:", (e as Error).message);
+    const msg = (e as Error).message || "";
+    // Retry once on a known-good model if the configured one was rejected.
+    if (opts.model !== MODEL_SAFE && looksLikeBadModel(msg)) {
+      try {
+        const out = parseJson<T | null>(await callOnce(MODEL_SAFE, payload), null as any);
+        return (out ?? opts.fallback) as T;
+      } catch (e2) {
+        console.warn("[competitiveMappingAi] retry failed, using fallback:", (e2 as Error).message);
+        return opts.fallback;
+      }
+    }
+    console.warn("[competitiveMappingAi] generation failed, using fallback:", msg);
     return opts.fallback;
   }
 }
 
-/* 1 - Company Overview */
-export async function generateOverview(companyName: string, website?: string) {
+/* 1 - Company Overview
+ * `context` carries everything Scrapling + the sheet + the deck pulled in, so
+ * the model writes from real evidence instead of guessing from the name alone.
+ */
+export async function generateOverview(
+  companyName: string,
+  website?: string,
+  context?: { websiteText?: string; sheetText?: string; deckText?: string },
+) {
   const fallback = {
     name: companyName, tagline: `Research profile for ${companyName}.`,
     website: website || "", founded: "-", hq: "-", stage: "-",
     growth: [] as any[], metrics: [] as any[], products: [] as any[],
   };
+
+  const evidence = [
+    context?.websiteText ? `WEBSITE / SCRAPED CONTENT:\n${context.websiteText.slice(0, 9000)}` : "",
+    context?.sheetText ? `T-SHEET (research sheet) CONTENT:\n${context.sheetText.slice(0, 7000)}` : "",
+    context?.deckText ? `PITCH DECK CONTENT:\n${context.deckText.slice(0, 6000)}` : "",
+  ].filter(Boolean).join("\n\n---\n\n");
+
+  const grounding = evidence
+    ? "Base every field on the EVIDENCE below; prefer figures found there over anything you recall. "
+    : "";
+
   return gen({
     model: MODEL_HEAVY,
     system:
@@ -66,8 +110,9 @@ export async function generateOverview(companyName: string, website?: string) {
       "growth (array of {y, rev} - 4-6 points, y is a period label, rev is a NUMBER for revenue/ARR), " +
       "metrics (array of {label, value, note} - 4 key traction metrics), " +
       "products (array of {name, rev, seg, problem, uses[]} - seg is 'B2B' or 'B2C', uses is 2-3 short strings). " +
-      "Use real, known facts; where a figure is unknown use a reasonable placeholder like '-'. Output ONLY the JSON object.",
-    prompt: `Company: ${companyName}${website ? `\nWebsite: ${website}` : ""}`,
+      grounding +
+      "Where a figure is genuinely unknown use '-' (or an empty array). Do NOT invent a different company. Output ONLY the JSON object.",
+    prompt: `Company: ${companyName}${website ? `\nWebsite: ${website}` : ""}${evidence ? `\n\nEVIDENCE:\n${evidence}` : ""}`,
     fallback,
   });
 }
@@ -96,7 +141,7 @@ const FENCE_KEYS =
   "supplyTG, segS, detailsS, problemS, vpS, prodDesc, prodFeat, tgJourney, supplyJourney, relTG, " +
   "mktg, sales, people, activities, resources, pricing, partners, estRev, segPct, revenue, revHw, " +
   "ppu, qtySold, revSw, earnStation, quantity, totalCost, varCost, varCostU, fixedCost, pl, " +
-  "fundStage, raised, valuation, valMult, investors";
+  "fundStage, raised, valuation, valMult, investors, website";
 
 export async function generateFencing(subject: string, direction: string, overview: any) {
   const rows = await gen<any[]>({
@@ -106,7 +151,8 @@ export async function generateFencing(subject: string, direction: string, overvi
       `same problem, especially those that have SCALED BEYOND ${subject}. Work at the PRODUCT level - a company ` +
       `with multiple products gets multiple rows. Return AT LEAST 15 rows across at least 10 companies as STRICT ` +
       `JSON: an array of objects with these keys: ${FENCE_KEYS}. ` +
-      `Rules: 'company' = the company display name; 'product' = the specific product; 'seg' and 'segD'/'segS' = ` +
+      `Rules: 'company' = the company display name; 'product' = the specific product; 'website' = the company's ` +
+      `primary domain (e.g. "statiq.in") so we can fetch its real logo/product image; 'seg' and 'segD'/'segS' = ` +
       `'B2B' or 'B2C'; 'scaledBeyond' = true when that company revenue/valuation clearly exceeds ${subject}; ` +
       `'sr' = a string row number starting at "1". Fill financial/funding fields with best-known values or "NA". ` +
       `Keep each text field concise (1-2 sentences). Output ONLY the JSON array.`,
