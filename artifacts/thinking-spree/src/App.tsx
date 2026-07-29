@@ -23,6 +23,7 @@ import PreSprintPage from "@/pages/pre-sprint";
 import EmailsPage from "@/pages/emails";
 import PostSprintPage from "@/pages/post-sprint";
 import InspirationResearchPage from "@/pages/research-inspiration";
+import CompetitiveMappingPage from "@/pages/competitive-mapping";
 import { customFetch } from "@workspace/api-client-react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
@@ -129,6 +130,9 @@ function Router() {
       </Route>
       <Route path="/research">
         <AuthGuard><InspirationResearchPage /></AuthGuard>
+      </Route>
+      <Route path="/competitive-mapping">
+        <AuthGuard><CompetitiveMappingPage /></AuthGuard>
       </Route>
       <Route path="/research/tools">
         <AuthGuard><ResearchPage /></AuthGuard>

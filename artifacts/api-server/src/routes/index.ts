@@ -23,6 +23,7 @@ import tSheetRouter from "./tSheet";
 import preSprintRouter from "./preSprint";
 import emailWorkspaceRouter from "./emailWorkspace";
 import contactsRouter from "./contacts";
+import competitiveMappingRouter from "./competitiveMapping";
 
 const router: IRouter = Router();
 
@@ -50,5 +51,6 @@ router.use(tSheetRouter);
 router.use(preSprintRouter);
 router.use(emailWorkspaceRouter);
 router.use(contactsRouter);
+router.use(competitiveMappingRouter);
 
 export default router;

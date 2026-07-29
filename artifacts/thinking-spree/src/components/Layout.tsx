@@ -3,7 +3,7 @@ import { useLogout, useGetMe } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import {
-  LayoutDashboard, Rocket, Flag, Users, Shield, Compass, Mail,
+  LayoutDashboard, Rocket, Flag, Users, Shield, Compass, Mail, Radar,
   LogOut, Menu, X, Bell, CircleHelp,
 } from "lucide-react";
 import { useState } from "react";
@@ -41,6 +41,7 @@ const navItems: NavItem[] = [
   { href: "/pre-sprint", label: "Pre-Sprint", icon: Rocket },
   { href: "/emails", label: "Emails", icon: Mail },
   { href: "/research", label: "Research", icon: Compass },
+  { href: "/competitive-mapping", label: "Competitive Mapping", icon: Radar },
   {
     href: "/post-sprint", label: "Post-Sprint", icon: Flag,
     match: ["/summary", "/builder", "/reports/outcomes", "/sprint-tracking"],
