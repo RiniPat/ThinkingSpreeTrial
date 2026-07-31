@@ -247,3 +247,168 @@ export async function copilotAnswer(input: {
     fallback,
   });
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v2 additions — Fencing (industry landscape), Scrapling plan, Breakdown.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/** The 46-column decode grid, as [key,label] — single source of truth shared
+ *  by the routes, the sheet writer and the front-end. Order matters. */
+export const BREAKDOWN_COLUMNS: { key: string; label: string }[] = [
+  { key: "sr", label: "Sr. No" },
+  { key: "company", label: "Company" },
+  { key: "product", label: "Product" },
+  { key: "image", label: "Product Image" },
+  { key: "useCase", label: "Use Case" },
+  { key: "audience", label: "Target Audience (from whom monetisation happens)" },
+  { key: "segD", label: "B2C / B2B" },
+  { key: "detailsD", label: "Details — demand-side profile" },
+  { key: "problemD", label: "Problem Statement" },
+  { key: "vpD", label: "Value Proposition" },
+  { key: "supplyTG", label: "User / Supply Target Group" },
+  { key: "segS", label: "B2C / B2B" },
+  { key: "detailsS", label: "Details — supply-side profile" },
+  { key: "problemS", label: "Problem Statement" },
+  { key: "vpS", label: "Value Proposition" },
+  { key: "prodDesc", label: "Product Description" },
+  { key: "prodFeat", label: "Product Features" },
+  { key: "tgJourney", label: "Target Group Journey (Post Purchase)" },
+  { key: "supplyJourney", label: "Supply Target Group Journey" },
+  { key: "relTG", label: "Relationship with TG" },
+  { key: "mktg", label: "Marketing Channels" },
+  { key: "sales", label: "Sales Channels" },
+  { key: "people", label: "Key People (Founders / CXOs)" },
+  { key: "activities", label: "Key Activities" },
+  { key: "resources", label: "Key Resources" },
+  { key: "pricing", label: "Pricing" },
+  { key: "partners", label: "Key Partners (Outsourced)" },
+  { key: "estRev", label: "Est. Company Revenue" },
+  { key: "segPct", label: "Segment %" },
+  { key: "revenue", label: "Revenue" },
+  { key: "revHw", label: "Revenue — Hardware" },
+  { key: "ppu", label: "Price / unit" },
+  { key: "qtySold", label: "Quantity Sold" },
+  { key: "revSw", label: "Revenue — Software" },
+  { key: "earnStation", label: "Earnings / Station" },
+  { key: "quantity", label: "Quantity" },
+  { key: "totalCost", label: "Total Cost" },
+  { key: "varCost", label: "Variable Costs" },
+  { key: "varCostU", label: "Var. Cost / unit" },
+  { key: "fixedCost", label: "Fixed Cost" },
+  { key: "pl", label: "Profit / Loss" },
+  { key: "fundStage", label: "Funding Stage" },
+  { key: "raised", label: "Amount Raised (Cr)" },
+  { key: "valuation", label: "Valuation (Cr)" },
+  { key: "valMult", label: "Last Val / Revenue" },
+  { key: "investors", label: "Investors" },
+];
+
+export type LandscapeMetric = { label: string; value: string; note?: string };
+export type LandscapeCompany = {
+  name: string; website?: string; type?: string; size?: string; hq?: string; note?: string;
+};
+export type Landscape = {
+  summary: string;
+  metrics: LandscapeMetric[];
+  companies: LandscapeCompany[];
+};
+
+/**
+ * FENCING (v2) — the industry LANDSCAPE, not the per-company grid.
+ * Dynamic, quantified market map + the EXHAUSTIVE list of companies in the
+ * space (this is what Prioritize then filters). Fields are not fixed: the
+ * metrics returned depend on the industry.
+ */
+export async function generateLandscape(
+  subject: string,
+  overview: any,
+  evidence?: string,
+): Promise<Landscape> {
+  const fallback: Landscape = { summary: "", metrics: [], companies: [] };
+  const out = await gen<Landscape>({
+    model: MODEL_HEAVY,
+    system:
+      `You are fencing an industry for a strategy consultant researching "${subject}". Produce an INDUSTRY ` +
+      `LANDSCAPE as STRICT JSON: { summary, metrics, companies }.\n` +
+      `- summary: 2-3 sentences framing the market for a consultant who must become an expert fast.\n` +
+      `- metrics: 6-12 QUANTIFIED, industry-appropriate data points as {label, value, note}. Choose the ` +
+      `metrics that actually matter for THIS industry (they are NOT fixed) — e.g. number of brands, count of ` +
+      `global vs local players, market size, typical price bands, unit volumes, funding concentration. Put ` +
+      `numbers in 'value'; 'note' gives basis/qualifier. Use "NA" when genuinely unknown.\n` +
+      `- companies: list EVERY notable company in the industry you can (aim for 15-40), as ` +
+      `{name, website (primary domain like "statiq.in"), type ("Global" | "Local" | "Regional"), size ` +
+      `(e.g. "Large / >100Cr", "Mid", "Early"), hq, note (one line on what they do / why they matter)}. ` +
+      `Be exhaustive — do the complete per-company breakdown LATER, here just map the field. ` +
+      `Output ONLY the JSON object.`,
+    prompt:
+      `SUBJECT: ${subject}\n\nSUBJECT OVERVIEW:\n${JSON.stringify(overview).slice(0, 5000)}` +
+      (evidence ? `\n\nSCRAPED EVIDENCE:\n${evidence.slice(0, 6000)}` : ""),
+    fallback,
+  });
+  return {
+    summary: typeof out?.summary === "string" ? out.summary : "",
+    metrics: Array.isArray(out?.metrics) ? out.metrics : [],
+    companies: Array.isArray(out?.companies) ? out.companies : [],
+  };
+}
+
+/**
+ * The AI tells Scrapling WHAT TO PULL for a company before the crawl runs.
+ * Lightweight, quick model. Returns sub-paths + freeform signals.
+ */
+export async function whatToScrape(
+  company: string, website?: string,
+): Promise<{ paths: string[]; wants: string[] }> {
+  const fallback = {
+    paths: ["about", "products", "product", "solutions", "pricing"],
+    wants: ["products & features", "pricing", "target customers", "founders", "traction / funding"],
+  };
+  const out = await gen<{ paths?: string[]; wants?: string[] }>({
+    model: MODEL_LITE,
+    system:
+      "For the company below, list the website sub-paths and the specific signals a competitor-research " +
+      "crawler should pull. Return STRICT JSON: { paths: string[] (relative, e.g. \"pricing\"), " +
+      "wants: string[] (signals, e.g. \"unit pricing\") }. Max 6 each. Output ONLY the JSON object.",
+    prompt: `Company: ${company}${website ? `\nWebsite: ${website}` : ""}`,
+    fallback,
+  });
+  return {
+    paths: Array.isArray(out?.paths) && out.paths.length ? out.paths.slice(0, 6) : fallback.paths,
+    wants: Array.isArray(out?.wants) && out.wants.length ? out.wants.slice(0, 6) : fallback.wants,
+  };
+}
+
+/**
+ * BREAKDOWN (v2) — the deep 46-column decode for ONE company, grounded by that
+ * company's scraped evidence. A company with several products yields several
+ * rows. This is the intensive AI+Scrapling task in the pipeline.
+ */
+export async function generateBreakdownForCompany(
+  subject: string,
+  company: string,
+  website: string | undefined,
+  evidence: string,
+): Promise<any[]> {
+  const rows = await gen<any[]>({
+    model: MODEL_HEAVY,
+    system:
+      `Build the deep competitive breakdown ("Industry Decoding") for "${company}" — one row PER PRODUCT — as ` +
+      `part of research on "${subject}". Return STRICT JSON: an array of objects with these keys: ${FENCE_KEYS}. ` +
+      `Ground every field in the SCRAPED EVIDENCE below; prefer figures found there. Rules: 'company' = "${company}"; ` +
+      `'product' = the specific product; 'website' = "${website || ""}"; 'seg'/'segD'/'segS' = 'B2B' or 'B2C'; ` +
+      `'scaledBeyond' = true if this company clearly out-scales ${subject}; 'sr' = a string row number starting "1". ` +
+      `Financial/funding fields = best-known value or "NA" (never invent precision). Keep text fields to 1-2 ` +
+      `sentences. Output ONLY the JSON array.`,
+    prompt:
+      `SUBJECT: ${subject}\nCOMPANY: ${company}\nWEBSITE: ${website || "unknown"}\n\nSCRAPED EVIDENCE:\n` +
+      `${(evidence || "(no live evidence — use best public knowledge)").slice(0, 9000)}`,
+    fallback: [] as any[],
+  });
+  return (Array.isArray(rows) ? rows : []).map((r, i) => ({
+    ...r,
+    sr: String(r.sr ?? i + 1),
+    company: r.company || company,
+    seg: r.seg ?? r.segD ?? "B2B",
+    scaledBeyond: !!r.scaledBeyond,
+  }));
+}

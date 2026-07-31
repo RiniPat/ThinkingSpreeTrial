@@ -4,6 +4,7 @@ import {
 } from "@workspace/api-client-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Layout } from "@/components/Layout";
+import { ResearchCopilotDock } from "@/components/ResearchCopilotDock";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link } from "wouter";
 import {
@@ -194,6 +195,7 @@ export default function DashboardPage() {
 
   return (
     <Layout>
+      <ResearchCopilotDock />
       <main className="flex-1 space-y-8 px-6 py-8 lg:px-10 max-w-[1400px] mx-auto">
         {/* Greeting */}
         <section className="flex flex-wrap items-end justify-between gap-4">

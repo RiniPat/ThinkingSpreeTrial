@@ -1,37 +1,41 @@
 /**
- * Competitive Mapping API — generates real research for any company via Gemini,
- * grounded by a real Scrapling crawl of the website (+ optional T-Sheet & deck),
- * persists every stage so a run can be revisited, and writes a Google Sheet.
+ * Competitive Mapping v2 API — 5-stage flow, Google-Sheet-first.
  *
- *   POST   /competitive-maps                     create run: scrape + overview + directions
- *   POST   /competitive-maps/ingest-deck         extract text from an uploaded pitch PDF
- *   POST   /competitive-maps/fence               generate Fencing grid (+ real images), persist rows
- *   POST   /competitive-maps/bmc                 generate + persist a BMC for one product
- *   POST   /competitive-maps/inspiration/suggest suggest aspirational-giant timelines
- *   POST   /competitive-maps/inspiration         generate + persist a timeline for one company
- *   GET    /competitive-maps                     list this consultant's saved runs   (revisit)
- *   GET    /competitive-maps/:id                 full saved run (overview+products+inspiration)
- *   GET/POST /competitive-maps/:id/copilot       saved Research Copilot chat
- *   POST   /competitive-maps/generate            write the Google Sheet to Drive
+ *   Data Feed (human)   POST /competitive-maps                    scrape + overview + CREATE sheet
+ *   Fencing   (AI)      POST /competitive-maps/:id/fence          async → industry landscape
+ *   Prioritize(human)   POST /competitive-maps/:id/prioritize     save shortlist
+ *   Breakdown (AI)      POST /competitive-maps/:id/breakdown      async → 46-col decode per company
+ *   Inspiration(human+AI)POST /competitive-maps/:id/inspiration    build a journey timeline
+ *
+ *   GET  /competitive-maps/jobs/:jobId        progress for an async stage
+ *   GET  /competitive-maps                    list saved runs (revisit)
+ *   GET  /competitive-maps/:id                full saved run
+ *   GET/POST /competitive-maps/:id/copilot    dashboard Research Copilot chat
+ *   POST /competitive-maps/ingest-deck        extract text from a pitch PDF/DOCX
+ *
+ * The Google Sheet "Research for [Company]" is created at Data Feed and written
+ * to progressively at every later stage, so the consultant watches it fill live.
  */
 import { Router } from "express";
 import multer from "multer";
 import {
-  db, competitiveMapsTable, copilotMessagesTable,
-  mapProductsTable, mapBmcTable, mapInspirationTable,
+  db, competitiveMapsTable, mapProductsTable, mapInspirationTable, copilotMessagesTable,
 } from "@workspace/db";
 import { eq, and, asc, desc } from "drizzle-orm";
-import { google } from "googleapis";
 import XLSX from "xlsx";
 import { getAuthedClient } from "../lib/google";
 import { fetchWebsiteText } from "../lib/websiteText";
 import { fetchSheetAsWorkbook } from "../lib/sheetsFetcher";
 import { extractTextFromUpload } from "../lib/fileExtract";
-import { scrapeCompanyProfile, resolveCompanyImage, resolveProductImages, logoForDomain } from "../lib/scraper";
+import { fetchSubjectProfile, fetchEvidence, guessDomain, logoForDomain } from "../lib/scrapling";
 import {
-  generateOverview, suggestDirections, generateFencing, generateBmc,
-  suggestInspiration, generateInspirationFor, copilotAnswer,
+  generateOverview, generateLandscape, whatToScrape, generateBreakdownForCompany,
+  suggestInspiration, generateInspirationFor, copilotAnswer, type Landscape,
 } from "../lib/competitiveMappingAi";
+import {
+  createResearchSheet, writeOverviewTab, writeFencingTab, writeBreakdownTab, writeInspirationTab,
+} from "../lib/sheetWriter";
+import { createJob, runInBackground, setProgress, getJob } from "../lib/mapJobs";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -54,50 +58,67 @@ function workbookToText(wb: XLSX.WorkBook): string {
   return out.join("\n\n").slice(0, 12000);
 }
 
-/* create a run: scrape → overview + directions for the entered company */
+async function loadMap(me: number, id: number) {
+  const [map] = await db.select().from(competitiveMapsTable)
+    .where(and(eq(competitiveMapsTable.id, id), eq(competitiveMapsTable.consultantId, me))).limit(1);
+  return map ?? null;
+}
+
+/* ── Stage 1 · DATA FEED (human) ─────────────────────────────────────────────
+ * name + T-Sheet + website are required; deck text optional. Scrape → overview →
+ * create the Google Sheet and write the Overview tab. */
 router.post("/competitive-maps", async (req, res) => {
   const me = uid(req, res); if (!me) return;
   const { companyName, website, tsheetUrl, deckText } = req.body ?? {};
-  if (!companyName) { res.status(400).json({ error: "companyName required" }); return; }
+  if (!companyName || !website || !tsheetUrl) {
+    res.status(400).json({ error: "companyName, website and tsheetUrl are all required." });
+    return;
+  }
   try {
-    // 1) Scrapling: crawl the website (+ high-signal sub-pages) for real content + image.
-    const profile = await scrapeCompanyProfile({ name: companyName, website }).catch(
-      () => ({ text: "", image: "", domain: "", pages: [] as string[] }),
+    // Scrapling: crawl the subject site for real grounding.
+    const profile = await fetchSubjectProfile(companyName, website).catch(
+      () => ({ text: "", image: "", images: [] as string[], domain: "", pages: [] as string[] }),
     );
     let websiteText = profile.text;
-    if (!websiteText && website) websiteText = await fetchWebsiteText(website).catch(() => "");
+    if (!websiteText) websiteText = await fetchWebsiteText(website).catch(() => "");
 
-    // 2) Optional T-Sheet ingest (needs Google connected).
+    // T-Sheet ingest (Google connected). Fails soft.
     let sheetText = "";
-    if (tsheetUrl) {
-      try { sheetText = workbookToText(await fetchSheetAsWorkbook(me, tsheetUrl)); }
-      catch (e) { console.warn("tsheet ingest skipped:", (e as Error).message); }
-    }
+    try { sheetText = workbookToText(await fetchSheetAsWorkbook(me, tsheetUrl)); }
+    catch (e) { console.warn("tsheet ingest skipped:", (e as Error).message); }
 
-    // 3) Overview + directions, grounded in the scraped evidence.
-    const overview = await generateOverview(companyName, website, {
+    const overview: any = await generateOverview(companyName, website, {
       websiteText, sheetText, deckText: typeof deckText === "string" ? deckText : "",
     });
-    if (profile.image && overview && !overview.logo) (overview as any).logo = profile.image;
-    if (profile.domain && overview && (!overview.website || overview.website === "-")) {
-      (overview as any).website = website || profile.domain;
-    }
-    const directions = await suggestDirections(overview);
+    if (profile.image && !overview.logo) overview.logo = profile.image;
+    if (!overview.website || overview.website === "-") overview.website = website || profile.domain;
 
-    const [row] = await db.insert(competitiveMapsTable)
-      .values({
-        consultantId: me, companyName, website: website ?? profile.domain ?? null,
-        tsheetUrl: tsheetUrl ?? null, status: "overview_ready", overview,
-      })
-      .returning();
+    // Create the Google Sheet now (if Google is connected).
+    let sheetId: string | null = null, sheetUrl: string | null = null, needsGoogle = false;
+    const auth = await getAuthedClient(me);
+    if (auth) {
+      try {
+        const s = await createResearchSheet(auth, companyName);
+        sheetId = s.spreadsheetId; sheetUrl = s.url;
+        await writeOverviewTab(auth, sheetId, companyName, overview);
+      } catch (e) { console.warn("sheet create failed:", (e as Error).message); }
+    } else {
+      needsGoogle = true;
+    }
+
+    const [row] = await db.insert(competitiveMapsTable).values({
+      consultantId: me, companyName, website, tsheetUrl,
+      status: "feed_ready", overview,
+      generatedSheetId: sheetId, generatedSheetUrl: sheetUrl,
+    }).returning();
 
     res.status(201).json({
-      id: row.id, overview, directions,
+      id: row.id, overview, sheetUrl, needsGoogle,
       scraped: { pages: profile.pages, image: profile.image },
     });
   } catch (e) {
-    console.error("create map failed", e);
-    res.status(500).json({ error: "generation failed" });
+    console.error("data feed failed", e);
+    res.status(500).json({ error: "Data Feed failed" });
   }
 });
 
@@ -115,102 +136,166 @@ router.post("/competitive-maps/ingest-deck", upload.single("file"), async (req, 
   }
 });
 
-/* Fencing grid — generate rows, resolve a real image per company, persist. */
-router.post("/competitive-maps/fence", async (req, res) => {
+/* ── Stage 2 · FENCING (AI, async) ──────────────────────────────────────────
+ * Industry landscape: quantified metrics + the exhaustive company list. */
+router.post("/competitive-maps/:id/fence", async (req, res) => {
   const me = uid(req, res); if (!me) return;
-  const { mapId, subject, direction, overview } = req.body ?? {};
-  try {
-    const rows = await generateFencing(subject || "the company", direction || "", overview || {});
+  const id = Number(req.params.id);
+  const map = await loadMap(me, id);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
 
-    // Scrape a ranked image list per DISTINCT company (dedupe fetches), then map back.
-    const byCompany = new Map<string, string[]>();
-    await Promise.all(
-      [...new Set(rows.map((r) => (r.company || "").toLowerCase()))].filter(Boolean).map(async (key) => {
-        const sample = rows.find((r) => (r.company || "").toLowerCase() === key)!;
-        const imgs = await resolveProductImages({ company: sample.company, website: sample.website }).catch(() => []);
-        const list = imgs.length ? imgs : (sample.website ? [logoForDomain(sample.website)] : []);
-        byCompany.set(key, list.filter(Boolean));
-      }),
-    );
-    const enriched = rows.map((r) => {
-      const list = byCompany.get((r.company || "").toLowerCase()) || [];
-      return { ...r, image: list[0] || "", images: list };
+  const jobId = await createJob(id, "fence");
+  res.status(202).json({ jobId });
+
+  runInBackground(jobId, async () => {
+    await db.update(competitiveMapsTable).set({ status: "fencing", updatedAt: new Date() }).where(eq(competitiveMapsTable.id, id));
+    await setProgress(jobId, 10, "Reading the subject & scanning the market…");
+
+    const profile = await fetchSubjectProfile(map.companyName, map.website || undefined).catch(() => null);
+    await setProgress(jobId, 40, "Mapping every company in the industry…");
+
+    const landscape = await generateLandscape(map.companyName, map.overview || {}, profile?.text || "");
+    // Enrich each company with a website + logo (no network — cheap URL fill).
+    landscape.companies = (landscape.companies || []).map((c) => {
+      const website = c.website || (guessDomain(c.name) ? `https://${guessDomain(c.name)}` : "");
+      return { ...c, website };
     });
+    await setProgress(jobId, 80, "Writing the landscape to your sheet…");
 
-    if (mapId) {
-      const id = Number(mapId);
-      await db.update(competitiveMapsTable)
-        .set({ direction: direction ?? null, status: "fenced", updatedAt: new Date() })
-        .where(eq(competitiveMapsTable.id, id));
-      // Replace any prior rows for this map (idempotent re-fence).
-      await db.delete(mapProductsTable).where(eq(mapProductsTable.mapId, id));
+    await db.update(competitiveMapsTable)
+      .set({ landscape: landscape as any, status: "fenced", updatedAt: new Date() })
+      .where(eq(competitiveMapsTable.id, id));
+
+    const auth = await getAuthedClient(me);
+    if (auth && map.generatedSheetId) {
+      await writeFencingTab(auth, map.generatedSheetId, landscape).catch((e) => console.warn("fencing tab:", (e as Error).message));
+    }
+    await setProgress(jobId, 100, `Fenced ${landscape.companies.length} companies`);
+  });
+});
+
+/* ── Stage 3 · PRIORITIZE (human) ────────────────────────────────────────── */
+router.post("/competitive-maps/:id/prioritize", async (req, res) => {
+  const me = uid(req, res); if (!me) return;
+  const id = Number(req.params.id);
+  const map = await loadMap(me, id);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
+  const selected = Array.isArray(req.body?.selected) ? req.body.selected : [];
+  await db.update(competitiveMapsTable)
+    .set({ selected: selected as any, status: "prioritized", updatedAt: new Date() })
+    .where(eq(competitiveMapsTable.id, id));
+  res.json({ ok: true, selected });
+});
+
+/* ── Stage 4 · BREAKDOWN (AI + Scrapling, async) ────────────────────────────
+ * Per selected company: AI decides what to pull → Scrapling fetches site +
+ * imagery → AI writes the 46-column decode → persist + write a company tab. */
+router.post("/competitive-maps/:id/breakdown", async (req, res) => {
+  const me = uid(req, res); if (!me) return;
+  const id = Number(req.params.id);
+  const map = await loadMap(me, id);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
+
+  const bodySel = Array.isArray(req.body?.selected) ? req.body.selected : null;
+  const selected: any[] = bodySel ?? (Array.isArray(map.selected) ? (map.selected as any[]) : []);
+  if (!selected.length) { res.status(400).json({ error: "No companies selected. Prioritize first." }); return; }
+
+  const jobId = await createJob(id, "breakdown", selected.length);
+  res.status(202).json({ jobId, total: selected.length });
+
+  runInBackground(jobId, async () => {
+    await db.update(competitiveMapsTable).set({ status: "breaking_down", updatedAt: new Date() }).where(eq(competitiveMapsTable.id, id));
+    const auth = await getAuthedClient(me);
+
+    for (let i = 0; i < selected.length; i++) {
+      const c = selected[i] ?? {};
+      const name = String(c.name || c.company || `Company ${i + 1}`);
+      const website = c.website || (guessDomain(name) ? `https://${guessDomain(name)}` : undefined);
+      await setProgress(jobId, i, `Breaking down ${name}…`);
+
+      // AI tells Scrapling what to pull; Scrapling replies with evidence.
+      const plan = await whatToScrape(name, website).catch(() => ({ paths: [], wants: [] }));
+      const evidence = await fetchEvidence(name, website, { paths: plan.paths, wants: plan.wants }).catch(() => null);
+      const evText = evidence?.text || "";
+      const images = evidence?.images?.length ? evidence.images : (website ? [logoForDomain(website)] : []);
+
+      const rows = await generateBreakdownForCompany(map.companyName, name, evidence?.website || website, evText);
+      const enriched = rows.map((r) => ({ ...r, image: images[0] || "", images }));
+
+      // Persist (replace any prior rows for this company in this map).
+      await db.delete(mapProductsTable)
+        .where(and(eq(mapProductsTable.mapId, id), eq(mapProductsTable.company, name)));
       if (enriched.length) {
-        await db.insert(mapProductsTable).values(enriched.map((r, i) => ({
-          mapId: id, srNo: Number(r.sr) || i + 1, company: String(r.company || "?"),
+        await db.insert(mapProductsTable).values(enriched.map((r, k) => ({
+          mapId: id, srNo: Number(r.sr) || k + 1, company: name,
           product: String(r.product || "?"), imageUrl: r.image || null,
-          seg: r.seg ?? null, scaledBeyond: !!r.scaledBeyond, data: r, selected: false, rank: null,
+          seg: r.seg ?? null, scaledBeyond: !!r.scaledBeyond, data: r, selected: true, rank: i + 1,
         })));
       }
+      if (auth && map.generatedSheetId) {
+        await writeBreakdownTab(auth, map.generatedSheetId, name, enriched)
+          .catch((e) => console.warn(`breakdown tab ${name}:`, (e as Error).message));
+      }
+      await setProgress(jobId, i + 1, `Done ${name}`);
     }
-    res.json({ rows: enriched });
-  } catch (e) { console.error("fence failed", e); res.json({ rows: [] }); }
+
+    await db.update(competitiveMapsTable).set({ status: "broken_down", updatedAt: new Date() }).where(eq(competitiveMapsTable.id, id));
+  });
 });
 
-/* BMC for one product (persisted when mapId + productId supplied) */
-router.post("/competitive-maps/bmc", async (req, res) => {
+/* ── Stage 5 · INSPIRATION (human pick + AI build) ──────────────────────────*/
+router.post("/competitive-maps/:id/inspiration/suggest", async (req, res) => {
   const me = uid(req, res); if (!me) return;
-  const { companyName, product, data, mapId, productId } = req.body ?? {};
-  try {
-    const blocks = await generateBmc(companyName || "Company", product || "", data || {});
-    if (mapId && productId) {
-      await db.insert(mapBmcTable).values({ mapId: Number(mapId), productId: Number(productId), blocks });
-    }
-    res.json({ blocks });
-  } catch (e) { console.error("bmc failed", e); res.status(500).json({ error: "bmc failed" }); }
-});
-
-/* Inspiration suggestions (2 giants) */
-router.post("/competitive-maps/inspiration/suggest", async (req, res) => {
-  const me = uid(req, res); if (!me) return;
-  const { subject, overview } = req.body ?? {};
-  try { res.json({ items: await suggestInspiration(subject || "the company", overview || {}) }); }
+  const id = Number(req.params.id);
+  const map = await loadMap(me, id);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
+  try { res.json({ items: await suggestInspiration(map.companyName, map.overview || {}) }); }
   catch (e) { console.error("insp suggest failed", e); res.json({ items: {} }); }
 });
 
-/* Inspiration for one company (persisted when mapId supplied) */
-router.post("/competitive-maps/inspiration", async (req, res) => {
+router.post("/competitive-maps/:id/inspiration", async (req, res) => {
   const me = uid(req, res); if (!me) return;
-  const { companyName, subject, mapId } = req.body ?? {};
+  const id = Number(req.params.id);
+  const map = await loadMap(me, id);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
+  const companyName = req.body?.companyName;
   if (!companyName) { res.status(400).json({ error: "companyName required" }); return; }
   try {
-    const out = await generateInspirationFor(companyName, subject || "the company");
-    if (mapId && out?.phases) {
+    const out: any = await generateInspirationFor(companyName, map.companyName);
+    if (out?.phases) {
       await db.insert(mapInspirationTable).values({
-        mapId: Number(mapId), companyName: out.who || companyName, phases: out.phases, aiGenerated: true,
+        mapId: id, companyName: out.who || companyName, phases: out.phases, aiGenerated: true,
       });
+      await db.update(competitiveMapsTable).set({ status: "inspiration", updatedAt: new Date() }).where(eq(competitiveMapsTable.id, id));
+      const auth = await getAuthedClient(me);
+      if (auth && map.generatedSheetId) {
+        await writeInspirationTab(auth, map.generatedSheetId, out.who || companyName, out.phases)
+          .catch((e) => console.warn("insp tab:", (e as Error).message));
+      }
     }
     res.json(out);
   } catch (e) { console.error("insp failed", e); res.status(500).json({ error: "insp failed" }); }
 });
 
-/* ── Saved runs — list + detail so consultants can revisit a company ─────── */
+/* ── Async job progress ─────────────────────────────────────────────────────*/
+router.get("/competitive-maps/jobs/:jobId", async (req, res) => {
+  const me = uid(req, res); if (!me) return;
+  const job = await getJob(Number(req.params.jobId));
+  if (!job) { res.status(404).json({ error: "not found" }); return; }
+  res.json(job);
+});
+
+/* ── Saved runs — list + detail (revisit) ───────────────────────────────────*/
 router.get("/competitive-maps", async (req, res) => {
   const me = uid(req, res); if (!me) return;
-  const rows = await db.select({
-    id: competitiveMapsTable.id, companyName: competitiveMapsTable.companyName,
-    website: competitiveMapsTable.website, status: competitiveMapsTable.status,
-    direction: competitiveMapsTable.direction, overview: competitiveMapsTable.overview,
-    generatedSheetUrl: competitiveMapsTable.generatedSheetUrl,
-    createdAt: competitiveMapsTable.createdAt, updatedAt: competitiveMapsTable.updatedAt,
-  }).from(competitiveMapsTable)
+  const rows = await db.select().from(competitiveMapsTable)
     .where(eq(competitiveMapsTable.consultantId, me))
     .orderBy(desc(competitiveMapsTable.updatedAt));
   res.json({
     maps: rows.map((r) => ({
       id: r.id, companyName: r.companyName, website: r.website, status: r.status,
-      direction: r.direction, logo: (r.overview as any)?.logo ?? null,
-      tagline: (r.overview as any)?.tagline ?? "", sheetUrl: r.generatedSheetUrl,
-      createdAt: r.createdAt, updatedAt: r.updatedAt,
+      logo: (r.overview as any)?.logo ?? null, tagline: (r.overview as any)?.tagline ?? "",
+      sheetUrl: r.generatedSheetUrl, createdAt: r.createdAt, updatedAt: r.updatedAt,
     })),
   });
 });
@@ -219,29 +304,33 @@ router.get("/competitive-maps/:id", async (req, res) => {
   const me = uid(req, res); if (!me) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "bad id" }); return; }
-  const [map] = await db.select().from(competitiveMapsTable)
-    .where(and(eq(competitiveMapsTable.id, id), eq(competitiveMapsTable.consultantId, me))).limit(1);
+  const map = await loadMap(me, id);
   if (!map) { res.status(404).json({ error: "not found" }); return; }
   const products = await db.select().from(mapProductsTable)
     .where(eq(mapProductsTable.mapId, id)).orderBy(asc(mapProductsTable.srNo));
   const inspiration = await db.select().from(mapInspirationTable)
     .where(eq(mapInspirationTable.mapId, id)).orderBy(asc(mapInspirationTable.createdAt));
 
-  // Rebuild the shapes the front-end context expects.
-  const rows = products.map((p) => ({ ...(p.data as any), image: p.imageUrl || (p.data as any)?.image || "" }));
+  // Group breakdown rows by company.
+  const byCompany: Record<string, any[]> = {};
+  for (const p of products) {
+    const row = { ...(p.data as any), image: p.imageUrl || (p.data as any)?.image || "" };
+    (byCompany[p.company] ||= []).push(row);
+  }
   const inspMap: Record<string, any> = {};
   inspiration.forEach((i) => {
     const slug = i.companyName.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || `co${i.id}`;
     inspMap[slug] = { who: i.companyName, phases: i.phases, generated: !!i.aiGenerated };
   });
+
   res.json({
     id: map.id, companyName: map.companyName, website: map.website, status: map.status,
-    direction: map.direction, overview: map.overview, rows, inspiration: inspMap,
-    generatedSheetUrl: map.generatedSheetUrl,
+    overview: map.overview, landscape: map.landscape ?? null, selected: map.selected ?? [],
+    breakdown: byCompany, inspiration: inspMap, sheetUrl: map.generatedSheetUrl,
   });
 });
 
-/* Research Copilot (saved chat) */
+/* ── Research Copilot (saved chat) — surfaced on the dashboard ───────────────*/
 router.get("/competitive-maps/:id/copilot", async (req, res) => {
   const me = uid(req, res); if (!me) return;
   const mapId = Number(req.params.id);
@@ -267,66 +356,6 @@ router.post("/competitive-maps/:id/copilot", async (req, res) => {
   });
   await db.insert(copilotMessagesTable).values({ mapId, role: "ai", focusCompany: focusCompany ?? null, content: blocks });
   res.json({ blocks });
-});
-
-/* Generate the workbook in the consultant's Google Drive */
-router.post("/competitive-maps/generate", async (req, res) => {
-  const me = uid(req, res); if (!me) return;
-  const authClient = await getAuthedClient(me);
-  if (!authClient) { res.status(400).json({ error: "Connect Google in Settings first." }); return; }
-  const p = req.body ?? {};
-  const subjectName = p.companyName || p.overview?.name || "Company";
-  const sanitize = (t: string) => String(t).replace(/[\\/?*\[\]:]/g, " ").slice(0, 95);
-  const selected = Array.isArray(p.selected) ? p.selected : [];
-  const inspiration = Array.isArray(p.inspiration) ? p.inspiration : [];
-  const columns = Array.isArray(p.columns) ? p.columns : [];
-  const tabNames = [
-    "Company Overview", "Industry Decoding (Fencing)", "Competitive Mapping (PODPOS)",
-    ...selected.map((s: any) => sanitize(`BMC - ${s.company} - ${s.product}`)),
-    ...inspiration.map((i: any) => sanitize(`Inspiration - ${i.who}`)),
-  ];
-  const sheets = google.sheets({ version: "v4", auth: authClient });
-  const created = await sheets.spreadsheets.create({
-    requestBody: { properties: { title: `TS Research for ${subjectName}` }, sheets: tabNames.map((title) => ({ properties: { title } })) },
-  });
-  const spreadsheetId = created.data.spreadsheetId!;
-  const data: { range: string; values: any[][] }[] = [];
-  const push = (title: string, values: any[][]) => data.push({ range: `'${title}'!A1`, values });
-  const o = p.overview ?? {};
-  push("Company Overview", [
-    ["Company Overview", subjectName],
-    ["Tagline", o.tagline ?? ""], ["Website", o.website ?? ""], ["Founded", o.founded ?? ""], ["HQ", o.hq ?? ""], ["Stage", o.stage ?? ""], [],
-    ["Metric", "Value"], ...(o.metrics ?? []).map((m: any) => [m.label, `${m.value} (${m.note ?? ""})`]), [],
-    ["Product", "Revenue - Segment - Problem"], ...(o.products ?? []).map((pr: any) => [pr.name, `${pr.rev} - ${pr.seg} - ${pr.problem}`]),
-  ]);
-  // Fencing — use =IMAGE(url) so the Product Image column shows a real picture.
-  push("Industry Decoding (Fencing)", [
-    columns.map((c: any) => c.label),
-    ...(p.fencing ?? []).map((r: any) => columns.map((c: any) =>
-      c.key === "image"
-        ? (r.image || r.imageUrl ? `=IMAGE("${String(r.image || r.imageUrl).replace(/"/g, "")}")` : "NA")
-        : (r[c.key] ?? "NA"))),
-  ]);
-  push("Competitive Mapping (PODPOS)", [
-    ["Point of similarity / difference", ...selected.map((s: any) => `${s.company} - ${s.product}`)],
-    ["Your company", ...selected.map(() => subjectName)],
-  ]);
-  const blocks: [string, string][] = [
-    ["Key Partners", "kp"], ["Key Activities", "ka"], ["Key Resources", "kr"], ["Value Propositions", "vp"],
-    ["Customer Relationships", "cr"], ["Channels", "ch"], ["Customer Segments", "cs"], ["Cost Structure", "cost"], ["Revenue Streams", "rev"],
-  ];
-  selected.forEach((s: any) => push(sanitize(`BMC - ${s.company} - ${s.product}`), [
-    [`${s.company} - ${s.product}`, "Business Model Canvas"],
-    ...blocks.map(([label, key]) => [label, ((s.bmc && s.bmc[key]) || []).map((x: any) => x.t ?? x).join("\n") || "AI drafting..."]),
-  ]));
-  inspiration.forEach((ins: any) => push(sanitize(`Inspiration - ${ins.who}`), [
-    ["Timeline", "Product & Capability", "Marketing & Positioning", "Funding & Investment", "Quantified Growth", "Key Customers / Partners"],
-    ...(ins.phases ?? []).map((ph: any) => [ph.era, ph.product, ph.market, ph.funding, ph.growth, ph.customers]),
-  ]));
-  await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: "USER_ENTERED", data } });
-  const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
-  if (p.mapId) await db.update(competitiveMapsTable).set({ generatedSheetId: spreadsheetId, generatedSheetUrl: url, status: "generated", updatedAt: new Date() }).where(eq(competitiveMapsTable.id, Number(p.mapId)));
-  res.json({ spreadsheetId, url, companyName: subjectName });
 });
 
 export default router;
