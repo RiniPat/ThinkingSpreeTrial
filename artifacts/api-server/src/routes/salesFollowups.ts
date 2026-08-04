@@ -419,6 +419,9 @@ router.post("/sales/followups/:key/send", async (req, res) => {
   const subject = String(req.body?.subject ?? "").trim();
   const bodyHtml = sanitizeHtml(String(req.body?.bodyHtml ?? ""));
   const toOverride = String(req.body?.to ?? "").trim();
+  // Which template this send used, so we can measure template performance
+  // (replies per template). Falls back to whatever was stored at draft time.
+  const templateKey = String(req.body?.templateKey ?? "").trim() || null;
 
   if (!subject) { res.status(400).json({ error: "Subject is required." }); return; }
   if (!bodyHtml) { res.status(400).json({ error: "The email body is empty." }); return; }
@@ -450,6 +453,8 @@ router.post("/sales/followups/:key/send", async (req, res) => {
       gmailThreadId: threadId,
       draftSubject: subject,
       draftBodyHtml: bodyHtml,
+      // Record the template used (keep any existing one if none supplied).
+      ...(templateKey ? { templateKey } : {}),
       // clear any stale reply state from a previous cycle
       replyState: null,
       replyDetectedAt: null,

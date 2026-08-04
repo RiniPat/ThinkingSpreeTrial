@@ -7,6 +7,7 @@ import {
   Mail, RefreshCw, Loader2, Search, Plus, X, Send, Save, Check,
   Bold, Italic, Underline, Highlighter, List, ListOrdered,
   AlertTriangle, CheckCircle2, Clock, ThumbsUp, ThumbsDown, MinusCircle,
+  MessageSquare, Trophy, ChevronRight, ChevronLeft,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -201,6 +202,117 @@ function StatCard({ label, value, hint, accent }: { label: string; value: string
   );
 }
 
+// ─── Reply / send helpers (drive insights + the clients "reverted" count) ────
+const SENT_STATUSES = new Set(["sent", "no_reply", "replied", "replied_interested", "replied_not_now"]);
+const REPLIED_STATUSES = new Set(["replied", "replied_interested", "replied_not_now"]);
+/** Has a follow-up actually gone out for this client? */
+function isSent(f: Followup): boolean {
+  return Boolean(f.sentAt) || SENT_STATUSES.has(f.status);
+}
+/** Did the client revert back to us (any reply, positive or otherwise)? */
+function isReplied(f: Followup): boolean {
+  return REPLIED_STATUSES.has(f.status) || f.replyState === "interested" || f.replyState === "not_now";
+}
+
+/** Human name for a stored templateKey (DB id, built-in fallback id, or legacy slug). */
+function resolveTemplateName(key: string | null, templates: DbTemplate[]): string {
+  if (!key) return "Untitled";
+  const db = templates.find((t) => String(t.id) === key);
+  if (db) return db.name;
+  const builtin = TEMPLATES.find((t, i) => key === t.key || key === String(-(i + 1)));
+  if (builtin) return builtin.name;
+  const legacy: Record<string, string> = { checkin: "Catch-up", next_sprint: "Two-sprint intervention", nudge: "Nudge" };
+  return legacy[key] ?? "Other template";
+}
+
+type TemplatePerf = { name: string; sent: number; replies: number; rate: number };
+/** Per-template send/reply tallies, ranked best-first. */
+function computeTemplatePerf(items: Followup[], templates: DbTemplate[]): TemplatePerf[] {
+  const map = new Map<string, TemplatePerf>();
+  for (const f of items) {
+    if (!f.templateKey || !isSent(f)) continue;
+    const name = resolveTemplateName(f.templateKey, templates);
+    const e = map.get(name) ?? { name, sent: 0, replies: 0, rate: 0 };
+    e.sent += 1;
+    if (isReplied(f)) e.replies += 1;
+    map.set(name, e);
+  }
+  return [...map.values()]
+    .map((e) => ({ ...e, rate: e.sent ? Math.round((e.replies / e.sent) * 100) : 0 }))
+    .sort((a, b) => b.replies - a.replies || b.rate - a.rate || b.sent - a.sent);
+}
+
+// ─── Template performance panel (visual insight) ────────────────────────────
+function TemplatePerformance({ items, templates }: { items: Followup[]; templates: DbTemplate[] }) {
+  const perf = useMemo(() => computeTemplatePerf(items, templates), [items, templates]);
+  const totalReplies = useMemo(() => items.filter(isReplied).length, [items]);
+  const totalSent = useMemo(() => items.filter(isSent).length, [items]);
+  const replyRate = totalSent ? Math.round((totalReplies / totalSent) * 100) : 0;
+  const best = perf[0] ?? null;
+  const maxRate = Math.max(1, ...perf.map((p) => p.rate));
+
+  return (
+    <div className="flex flex-col rounded-xl border border-card-border bg-card p-5">
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          What’s working
+        </div>
+        <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+          style={{ background: "#E0F4F3", color: "#0B6B6B" }}>
+          <MessageSquare size={11} /> {totalReplies} repl{totalReplies === 1 ? "y" : "ies"}
+        </span>
+      </div>
+
+      {/* Hero numbers */}
+      <div className="mt-3 flex flex-wrap items-end gap-x-6 gap-y-2">
+        <div>
+          <div className="font-serif text-4xl leading-none" style={{ color: GOLD }}>{totalReplies}</div>
+          <div className="mt-1 text-[11px] text-muted-foreground">clients reverted</div>
+        </div>
+        <div>
+          <div className="font-serif text-4xl leading-none">{replyRate}<span className="text-2xl">%</span></div>
+          <div className="mt-1 text-[11px] text-muted-foreground">reply rate · {totalSent} sent</div>
+        </div>
+        {best && (
+          <div className="ml-auto text-right">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Top template</div>
+            <div className="mt-0.5 inline-flex items-center gap-1 text-sm font-medium">
+              <Trophy size={13} style={{ color: GOLD }} /> {best.name}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Per-template bars */}
+      <div className="mt-4 space-y-2.5">
+        {perf.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted-foreground">
+            Send a few follow-ups and log the replies — the best-performing template will surface here.
+          </div>
+        ) : (
+          perf.slice(0, 4).map((p, i) => (
+            <div key={p.name}>
+              <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+                <span className="flex min-w-0 items-center gap-1.5 font-medium">
+                  {i === 0 && <Trophy size={12} style={{ color: GOLD }} className="shrink-0" />}
+                  <span className="truncate">{p.name}</span>
+                </span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">
+                  {p.replies}/{p.sent} · {p.rate}%
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full transition-all"
+                  style={{ width: `${Math.round((p.rate / maxRate) * 100)}%`, background: i === 0 ? GOLD : "hsl(222 47% 45%)" }} />
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 const FILTERS = [
   { key: "all", label: "All" },
   { key: "due", label: "Due" },
@@ -210,12 +322,15 @@ const FILTERS = [
 ] as const;
 type FilterKey = (typeof FILTERS)[number]["key"];
 
+const PAGE_SIZE = 40; // "indexation": render at most one page of clients at a time
+
 // ─── Page ───────────────────────────────────────────────────────────────────
 export default function SalesInboxPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [filter, setFilter] = useState<FilterKey>("all");
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
   const [tab, setTab] = useState<"followups" | "templates" | "clients" | "pipeline">("followups");
@@ -275,12 +390,23 @@ export default function SalesInboxPage() {
         default: return true;
       }
     }).sort((a, b) => {
-      // Due first, then most-recently-active.
-      const rank = (f: Followup) => (f.status === "due" ? 0 : f.status === "no_reply" ? 1 : 2);
-      if (rank(a) !== rank(b)) return rank(a) - rank(b);
-      return (b.daysSinceSprint ?? 0) - (a.daysSinceSprint ?? 0);
+      // Latest companies first: most recent sprint at the top, oldest at the end.
+      const ta = a.lastSprintDate ? new Date(a.lastSprintDate).getTime() : -Infinity;
+      const tb = b.lastSprintDate ? new Date(b.lastSprintDate).getTime() : -Infinity;
+      return tb - ta;
     });
   }, [items, q, filter]);
+
+  // Pagination ("indexation") — only ever render one page of rows so a large
+  // client list (hundreds of rows) never bogs the page down.
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageItems = useMemo(
+    () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [filtered, safePage],
+  );
+  // Any change to the filter or search resets to the first page.
+  useEffect(() => { setPage(1); }, [filter, q]);
 
   const openRow = items.find((f) => f.key === openKey) ?? null;
 
@@ -334,14 +460,18 @@ export default function SalesInboxPage() {
           </div>
         )}
 
-        {/* Stat strip */}
-        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <StatCard label="Due for follow-up" value={stats?.due ?? "—"} accent />
-          <StatCard label="Completed sprints" value={stats?.completedSprints ?? "—"} hint="from sheet" />
-          <StatCard label="Sent this month" value={stats?.sentThisMonth ?? "—"} />
-          <StatCard label="Reply rate" value={stats ? `${stats.replyRate}%` : "—"} />
-          <StatCard label="Awaiting reply" value={stats?.awaitingReply ?? "—"} />
-          <StatCard label="Needs nudge" value={stats?.needsNudge ?? "—"} />
+        {/* Insights: key stats (left) + template performance (right) — a balanced
+            two-column band so the top of the page reads evenly, not cluttered. */}
+        <div className="mt-6 grid gap-4 lg:grid-cols-[1.15fr_1fr]">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <StatCard label="Due for follow-up" value={stats?.due ?? "—"} accent />
+            <StatCard label="Awaiting reply" value={stats?.awaitingReply ?? "—"} />
+            <StatCard label="Needs nudge" value={stats?.needsNudge ?? "—"} />
+            <StatCard label="Sent this month" value={stats?.sentThisMonth ?? "—"} />
+            <StatCard label="Completed sprints" value={stats?.completedSprints ?? "—"} hint="from sheet" />
+            <StatCard label="Reply rate" value={stats ? `${stats.replyRate}%` : "—"} />
+          </div>
+          <TemplatePerformance items={items} templates={templates} />
         </div>
 
         {/* Section card */}
@@ -430,31 +560,53 @@ export default function SalesInboxPage() {
               No clients match. Try “Refresh” to pull the latest from the sheet.
             </div>
           ) : (
+            <>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
                     <th className="px-5 py-2.5 font-medium">Client</th>
+                    <th className="px-3 py-2.5 font-medium">Status</th>
                     <th className="px-3 py-2.5 font-medium">Program</th>
                     <th className="px-3 py-2.5 font-medium">Stage</th>
+                    <th className="px-3 py-2.5 font-medium">Days</th>
                     <th className="px-3 py-2.5 font-medium">Sprint done</th>
                     <th className="px-3 py-2.5 font-medium">Sessions</th>
                     <th className="px-3 py-2.5 font-medium">Host</th>
-                    <th className="px-3 py-2.5 font-medium">Days</th>
-                    <th className="px-3 py-2.5 font-medium">Status</th>
-                    <th className="px-5 py-2.5" />
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((f) => {
+                  {pageItems.map((f) => {
                     const sm = statusMeta(f.status);
                     const pm = programMeta(f.program);
                     const stg = STAGE_META[(f.stage ?? "").toLowerCase()];
                     return (
-                      <tr key={f.key} className="border-b border-border/60 hover:bg-accent/40" data-testid={`row-followup-${f.key}`}>
+                      <tr
+                        key={f.key}
+                        onClick={() => setOpenKey(f.key)}
+                        className="cursor-pointer border-b border-border/60 hover:bg-accent/40"
+                        data-testid={`row-followup-${f.key}`}
+                      >
+                        {/* Client + an always-visible Follow-up button on the far
+                            left, so the consultant never has to scroll sideways. */}
                         <td className="px-5 py-3">
-                          <div className="font-medium">{f.startup}</div>
-                          <div className="text-xs text-muted-foreground">{f.contact ?? "—"}{f.email ? ` · ${f.email}` : ""}</div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">{f.startup}</div>
+                              <div className="truncate text-xs text-muted-foreground">{f.contact ?? "—"}{f.email ? ` · ${f.email}` : ""}</div>
+                            </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setOpenKey(f.key); }}
+                              className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-white"
+                              style={{ background: "hsl(222 47% 20%)" }}
+                              data-testid={`action-open-${f.key}`}
+                            >
+                              <Mail size={13} /> Follow up
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-3 py-3">
+                          <span className="whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: sm.bg, color: sm.fg }}>{sm.label}</span>
                         </td>
                         <td className="px-3 py-3">
                           {f.program
@@ -465,6 +617,9 @@ export default function SalesInboxPage() {
                           {f.stage
                             ? <span className="rounded px-2 py-0.5 text-[11px] font-medium" style={stg ? { background: stg.bg, color: stg.fg } : { background: "#F1EFE8", color: "#5F5E5A" }}>{f.stage}</span>
                             : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-3 py-3 tabular-nums">
+                          {f.daysSinceSprint != null ? `${f.daysSinceSprint}d` : "—"}
                         </td>
                         <td className="px-3 py-3">
                           {f.sprintCompleted === true
@@ -478,27 +633,41 @@ export default function SalesInboxPage() {
                           <div>{f.host ?? "—"}</div>
                           {f.cohost && <div className="text-xs text-muted-foreground">+ {f.cohost}</div>}
                         </td>
-                        <td className="px-3 py-3 tabular-nums">
-                          {f.daysSinceSprint != null ? `${f.daysSinceSprint}d` : "—"}
-                        </td>
-                        <td className="px-3 py-3">
-                          <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: sm.bg, color: sm.fg }}>{sm.label}</span>
-                        </td>
-                        <td className="px-5 py-3 text-right">
-                          <button
-                            onClick={() => setOpenKey(f.key)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent"
-                            data-testid={`action-open-${f.key}`}
-                          >
-                            <Mail size={13} /> Follow up
-                          </button>
-                        </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+
+            {/* Pager */}
+            {filtered.length > PAGE_SIZE && (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3 text-sm">
+                <span className="text-muted-foreground">
+                  Showing <span className="tabular-nums">{(safePage - 1) * PAGE_SIZE + 1}</span>–
+                  <span className="tabular-nums">{Math.min(safePage * PAGE_SIZE, filtered.length)}</span> of{" "}
+                  <span className="tabular-nums">{filtered.length}</span>
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={safePage <= 1}
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-40"
+                  >
+                    <ChevronLeft size={14} /> Prev
+                  </button>
+                  <span className="px-1 tabular-nums text-muted-foreground">Page {safePage} / {totalPages}</span>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={safePage >= totalPages}
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-40"
+                  >
+                    Next <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+            </>
           )}
           </>
           )}
@@ -584,7 +753,10 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
     mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/send`), {
       method: "POST", credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subject, bodyHtml: readBody(), to }),
+      body: JSON.stringify({
+        subject, bodyHtml: readBody(), to,
+        templateKey: tmplId != null ? String(tmplId) : row.templateKey ?? null,
+      }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Follow-up sent", description: `Emailed ${to}.` }); onClose(); },
     onError: (e: any) => toast({ title: "Send failed", description: String(e?.message ?? e), variant: "destructive" }),
@@ -966,19 +1138,60 @@ function SignoffCard({ profile }: { profile?: Profile }) {
 // ─── Clients directory (Clients tab) ────────────────────────────────────────
 function ClientsPanel({ items, loading }: { items: Followup[]; loading: boolean }) {
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+
+  // "Reverted" = the client replied to a follow-up (interested or not-now).
+  const reverted = useMemo(() => items.filter(isReplied).length, [items]);
+  const sent = useMemo(() => items.filter(isSent).length, [items]);
+  const revertRate = sent ? Math.round((reverted / sent) * 100) : 0;
+
   const rows = useMemo(() => {
     const term = q.trim().toLowerCase();
     return items
       .filter((f) => !term || `${f.startup} ${f.contact ?? ""} ${f.email ?? ""} ${f.program ?? ""}`.toLowerCase().includes(term))
-      .sort((a, b) => a.startup.localeCompare(b.startup));
+      .sort((a, b) => {
+        // Clients who reverted float to the top, then most recent sprint first.
+        const ra = isReplied(a) ? 0 : 1, rb = isReplied(b) ? 0 : 1;
+        if (ra !== rb) return ra - rb;
+        const ta = a.lastSprintDate ? new Date(a.lastSprintDate).getTime() : -Infinity;
+        const tb = b.lastSprintDate ? new Date(b.lastSprintDate).getTime() : -Infinity;
+        return tb - ta;
+      });
   }, [items, q]);
+
+  useEffect(() => { setPage(1); }, [q]);
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = useMemo(() => rows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE), [rows, safePage]);
 
   if (loading) return <div className="flex items-center gap-2 p-10 text-sm text-muted-foreground"><Loader2 size={16} className="animate-spin" /> Loading clients…</div>;
 
   return (
     <div>
+      {/* Reverted-back insight header */}
+      <div className="grid gap-3 border-b border-border px-5 py-4 sm:grid-cols-3">
+        <div className="rounded-lg border border-card-border bg-card px-4 py-3">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Total clients</div>
+          <div className="mt-1 font-serif text-3xl leading-none">{items.length}</div>
+          <div className="mt-1 text-[11px] text-muted-foreground">from Live Sprint Tracking</div>
+        </div>
+        <div className="rounded-lg border px-4 py-3" style={{ borderColor: "var(--gold)", background: "hsl(36 70% 97%)" }}>
+          <div className="text-[11px] font-medium uppercase tracking-wider" style={{ color: "#8A5A00" }}>Reverted for follow-up</div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <div className="font-serif text-3xl leading-none" style={{ color: GOLD }}>{reverted}</div>
+            <span className="text-sm text-muted-foreground">/ {sent} contacted</span>
+          </div>
+          <div className="mt-1 text-[11px] text-muted-foreground">{revertRate}% of clients we followed up with replied</div>
+        </div>
+        <div className="rounded-lg border border-card-border bg-card px-4 py-3">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Follow-ups sent</div>
+          <div className="mt-1 font-serif text-3xl leading-none">{sent}</div>
+          <div className="mt-1 text-[11px] text-muted-foreground">across all clients</div>
+        </div>
+      </div>
+
       <div className="flex items-center justify-between gap-2 border-b border-border px-5 py-3">
-        <div className="text-sm text-muted-foreground">{rows.length} client{rows.length === 1 ? "" : "s"} from Live Sprint Tracking</div>
+        <div className="text-sm text-muted-foreground">{rows.length} client{rows.length === 1 ? "" : "s"}{q ? " matched" : ""}</div>
         <div className="relative">
           <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" className="w-56 rounded-md border border-border bg-background py-1.5 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
@@ -989,35 +1202,64 @@ function ClientsPanel({ items, loading }: { items: Followup[]; loading: boolean 
           <thead>
             <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
               <th className="px-5 py-2.5 font-medium">Client</th>
+              <th className="px-3 py-2.5 font-medium">Reverted</th>
               <th className="px-3 py-2.5 font-medium">Email</th>
               <th className="px-3 py-2.5 font-medium">Program</th>
               <th className="px-3 py-2.5 font-medium">Stage</th>
               <th className="px-3 py-2.5 font-medium">Host</th>
               <th className="px-3 py-2.5 font-medium">Sessions</th>
               <th className="px-3 py-2.5 font-medium">Last sprint</th>
-              <th className="px-3 py-2.5 font-medium">Done</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((f) => {
+            {pageRows.map((f) => {
               const pm = programMeta(f.program);
               const stg = STAGE_META[(f.stage ?? "").toLowerCase()];
+              const replied = isReplied(f);
               return (
                 <tr key={f.key} className="border-b border-border/60 hover:bg-accent/40">
                   <td className="px-5 py-3"><div className="font-medium">{f.startup}</div><div className="text-xs text-muted-foreground">{f.contact ?? "—"}</div></td>
+                  <td className="px-3 py-3">
+                    {replied
+                      ? <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "#E1F5EE", color: "#0F6E56" }}><CheckCircle2 size={12} /> Reverted</span>
+                      : isSent(f)
+                        ? <span className="whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "#E6F1FB", color: "#0C447C" }}>Awaiting</span>
+                        : <span className="text-muted-foreground">—</span>}
+                  </td>
                   <td className="px-3 py-3 text-muted-foreground">{f.email ?? "—"}</td>
                   <td className="px-3 py-3">{f.program ? <span className="rounded px-2 py-0.5 text-[11px] font-medium" style={{ background: pm.bg, color: pm.fg }}>{f.program}</span> : "—"}</td>
                   <td className="px-3 py-3">{f.stage ? <span className="rounded px-2 py-0.5 text-[11px] font-medium" style={stg ? { background: stg.bg, color: stg.fg } : { background: "#F1EFE8", color: "#5F5E5A" }}>{f.stage}</span> : "—"}</td>
                   <td className="px-3 py-3">{f.host ?? "—"}{f.cohost ? <span className="text-xs text-muted-foreground"> +{f.cohost}</span> : ""}</td>
                   <td className="px-3 py-3 tabular-nums">{f.sessions ?? "—"}</td>
                   <td className="px-3 py-3">{fmtDate(f.lastSprintDate)}</td>
-                  <td className="px-3 py-3">{f.sprintCompleted === true ? <CheckCircle2 size={14} style={{ color: "var(--success)" }} /> : f.sprintCompleted === false ? <span className="text-muted-foreground text-[12px]">No</span> : "—"}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+
+      {/* Pager */}
+      {rows.length > PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3 text-sm">
+          <span className="text-muted-foreground">
+            Showing <span className="tabular-nums">{(safePage - 1) * PAGE_SIZE + 1}</span>–
+            <span className="tabular-nums">{Math.min(safePage * PAGE_SIZE, rows.length)}</span> of{" "}
+            <span className="tabular-nums">{rows.length}</span>
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-40">
+              <ChevronLeft size={14} /> Prev
+            </button>
+            <span className="px-1 tabular-nums text-muted-foreground">Page {safePage} / {totalPages}</span>
+            <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={safePage >= totalPages}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-40">
+              Next <ChevronRight size={14} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
