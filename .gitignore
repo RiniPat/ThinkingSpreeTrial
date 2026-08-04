@@ -48,6 +48,9 @@ Thumbs.db
 .cache/
 .local/
 
+# graphify output (generated knowledge-graph artifacts & scratch cache)
+graphify-out/
+
 # Environment files (contain secrets — never commit)
 .env
 .env.local
