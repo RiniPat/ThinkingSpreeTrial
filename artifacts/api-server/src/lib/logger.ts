@@ -1,3 +1,11 @@
+/**
+ * Shared pino logger for the api-server.
+ *
+ * Level comes from `LOG_LEVEL` (default `info`). Sensitive request/response
+ * headers (authorization, cookie, set-cookie) are always redacted so secrets
+ * never reach the logs. In non-production it pretty-prints via `pino-pretty`;
+ * in production it emits structured JSON for log aggregation.
+ */
 import pino from "pino";
 
 const isProduction = process.env.NODE_ENV === "production";

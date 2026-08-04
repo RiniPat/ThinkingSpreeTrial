@@ -25,10 +25,15 @@ function readBuffer(buf: Buffer): Record<string, Row[]> {
   return out;
 }
 
+/** Read an `.xlsx` file from disk into `{ sheetName: rows }` (used by the
+ *  deploy-time seed script). Each row is an array of cell values, header row
+ *  included. */
 export function readFile(path: string): Record<string, Row[]> {
   return readBuffer(fs.readFileSync(path));
 }
 
+/** Same as {@link readFile} but for an in-memory upload buffer (used by the
+ *  `/admin/import` route). */
 export function readUploadedBuffer(buf: Buffer): Record<string, Row[]> {
   return readBuffer(buf);
 }
@@ -353,6 +358,9 @@ export async function importSprintTracking(
 }
 
 // ─── Ensure the three canonical incubators exist ──────────────────────────
+/** Idempotently create (or fetch) the three canonical incubators — ISB, JU,
+ *  and Demo — so imports and seeding always have a valid cohort to attach
+ *  founders to. Returns the three incubator records. */
 export async function ensureCoreIncubators() {
   const isb = await getOrCreateIncubator("ISB IVI 4.0", "isb",
     "Indian School of Business — Venture Incubation, cohort 4.0");
@@ -366,6 +374,10 @@ export async function ensureCoreIncubators() {
 // ─── Auto-detect sheet type from header ───────────────────────────────────
 export type SheetKind = "isb-summary" | "ju-summary" | "sheet-tracking" | "unknown";
 
+/** Classify a sheet from its header row so the upload route can pick the right
+ *  importer. Matches on signature columns (e.g. "Sprint Date"+"Sprint Host" →
+ *  tracking; "Startup"+"Goal Setting", with "Ideal Customer" distinguishing JU
+ *  from ISB). Returns `"unknown"` when nothing matches. */
 export function detectSheetKind(rows: Row[]): SheetKind {
   const firstHeader = (rows[0] ?? []).map(h => String(h ?? "").toLowerCase()).join("|");
   if (firstHeader.includes("sprint date") && firstHeader.includes("sprint host")) return "sheet-tracking";
