@@ -30,11 +30,14 @@ import { extractTextFromUpload } from "../lib/fileExtract";
 import { fetchSubjectProfile, fetchEvidence, guessDomain, logoForDomain } from "../lib/scrapling";
 import {
   generateOverview, generateLandscape, whatToScrape, generateBreakdownForCompany,
-  suggestInspiration, generateInspirationFor, copilotAnswer, type Landscape,
+  suggestInspiration, generateInspirationFor, copilotAnswer,
+  generateIndustryDemandMap, generateCompetitiveLandscape, suggestCopilotPrompts, type Landscape,
 } from "../lib/competitiveMappingAi";
 import {
   createResearchSheet, writeOverviewTab, writeFencingTab, writeBreakdownTab, writeInspirationTab,
+  writeDemandMapTab, writeCompetitiveLandscapeTab,
 } from "../lib/sheetWriter";
+import { assignProductImages } from "../lib/productImages";
 import { createJob, runInBackground, setProgress, getJob } from "../lib/mapJobs";
 
 const router = Router();
@@ -144,33 +147,56 @@ router.post("/competitive-maps/:id/fence", async (req, res) => {
   const map = await loadMap(me, id);
   if (!map) { res.status(404).json({ error: "not found" }); return; }
 
+  // v3: consultant scopes the fence to a geography + industry/application.
+  const geography = String(req.body?.geography || map.geography || "India").trim();
+  const industry = String(req.body?.industry || map.industry || "").trim();
+  const scope = { geography, industry };
+
   const jobId = await createJob(id, "fence");
   res.status(202).json({ jobId });
 
   runInBackground(jobId, async () => {
-    await db.update(competitiveMapsTable).set({ status: "fencing", updatedAt: new Date() }).where(eq(competitiveMapsTable.id, id));
-    await setProgress(jobId, 10, "Reading the subject & scanning the market…");
+    await db.update(competitiveMapsTable)
+      .set({ status: "fencing", geography, industry, updatedAt: new Date() })
+      .where(eq(competitiveMapsTable.id, id));
+    await setProgress(jobId, 8, `Scanning the ${industry || "industry"} in ${geography}…`);
 
     const profile = await fetchSubjectProfile(map.companyName, map.website || undefined).catch(() => null);
-    await setProgress(jobId, 40, "Mapping every company in the industry…");
+    await setProgress(jobId, 30, "Mapping every company in the industry…");
 
-    const landscape = await generateLandscape(map.companyName, map.overview || {}, profile?.text || "");
+    const landscape = await generateLandscape(map.companyName, map.overview || {}, profile?.text || "", scope);
     // Enrich each company with a website + logo (no network — cheap URL fill).
     landscape.companies = (landscape.companies || []).map((c) => {
       const website = c.website || (guessDomain(c.name) ? `https://${guessDomain(c.name)}` : "");
       return { ...c, website };
     });
-    await setProgress(jobId, 80, "Writing the landscape to your sheet…");
+
+    // v3 artifacts, scoped to geography + industry.
+    await setProgress(jobId, 55, `Building the ${geography} industry demand map…`);
+    const demandMap = await generateIndustryDemandMap(map.companyName, map.overview || {}, scope, profile?.text || "")
+      .catch((e) => { console.warn("demand map:", (e as Error).message); return null; });
+
+    await setProgress(jobId, 72, "Building the competitive landscape…");
+    const competitiveDoc = await generateCompetitiveLandscape(map.companyName, map.overview || {}, scope, profile?.text || "")
+      .catch((e) => { console.warn("competitive doc:", (e as Error).message); return null; });
+    await setProgress(jobId, 88, "Writing the landscape to your sheet…");
 
     await db.update(competitiveMapsTable)
-      .set({ landscape: landscape as any, status: "fenced", updatedAt: new Date() })
+      .set({
+        landscape: landscape as any,
+        demandMap: (demandMap as any) ?? null,
+        competitiveDoc: (competitiveDoc as any) ?? null,
+        status: "fenced", updatedAt: new Date(),
+      })
       .where(eq(competitiveMapsTable.id, id));
 
     const auth = await getAuthedClient(me);
     if (auth && map.generatedSheetId) {
       await writeFencingTab(auth, map.generatedSheetId, landscape).catch((e) => console.warn("fencing tab:", (e as Error).message));
+      if (demandMap) await writeDemandMapTab(auth, map.generatedSheetId, demandMap).catch((e) => console.warn("demand tab:", (e as Error).message));
+      if (competitiveDoc) await writeCompetitiveLandscapeTab(auth, map.generatedSheetId, competitiveDoc).catch((e) => console.warn("landscape tab:", (e as Error).message));
     }
-    await setProgress(jobId, 100, `Fenced ${landscape.companies.length} companies`);
+    await setProgress(jobId, 100, `Fenced ${landscape.companies.length} companies in ${geography}`);
   });
 });
 
@@ -217,10 +243,14 @@ router.post("/competitive-maps/:id/breakdown", async (req, res) => {
       const plan = await whatToScrape(name, website).catch(() => ({ paths: [], wants: [] }));
       const evidence = await fetchEvidence(name, website, { paths: plan.paths, wants: plan.wants }).catch(() => null);
       const evText = evidence?.text || "";
-      const images = evidence?.images?.length ? evidence.images : (website ? [logoForDomain(website)] : []);
+      const logo = evidence?.logo || (website ? logoForDomain(website) : "");
 
       const rows = await generateBreakdownForCompany(map.companyName, name, evidence?.website || website, evText);
-      const enriched = rows.map((r) => ({ ...r, image: images[0] || "", images }));
+      // Give EACH product its own, product-specific image (distinct, no repeats).
+      const gallery = evidence?.gallery?.length
+        ? evidence.gallery
+        : (evidence?.images || []).map((url) => ({ url, alt: "" }));
+      const enriched = assignProductImages(rows, gallery, { industry: map.industry || undefined, logo });
 
       // Persist (replace any prior rows for this company in this map).
       await db.delete(mapProductsTable)
@@ -326,6 +356,8 @@ router.get("/competitive-maps/:id", async (req, res) => {
   res.json({
     id: map.id, companyName: map.companyName, website: map.website, status: map.status,
     overview: map.overview, landscape: map.landscape ?? null, selected: map.selected ?? [],
+    geography: map.geography ?? "", industry: map.industry ?? "",
+    demandMap: map.demandMap ?? null, competitiveDoc: map.competitiveDoc ?? null,
     breakdown: byCompany, inspiration: inspMap, sheetUrl: map.generatedSheetUrl,
   });
 });
@@ -346,16 +378,35 @@ router.post("/competitive-maps/:id/copilot", async (req, res) => {
   if (!question) { res.status(400).json({ error: "question required" }); return; }
   const [map] = await db.select().from(competitiveMapsTable).where(eq(competitiveMapsTable.id, mapId)).limit(1);
   const subject = map?.companyName ?? "the subject company";
+  // Ground the assistant in this company's own research so it's specialised.
+  const context = [
+    map?.overview ? `OVERVIEW:\n${JSON.stringify(map.overview).slice(0, 3000)}` : "",
+    (map?.geography || map?.industry) ? `SCOPE: ${map?.industry || "industry"} in ${map?.geography || "market"}` : "",
+    map?.landscape ? `INDUSTRY LANDSCAPE:\n${JSON.stringify(map.landscape).slice(0, 3000)}` : "",
+  ].filter(Boolean).join("\n\n");
   const history = await db.select().from(copilotMessagesTable)
     .where(eq(copilotMessagesTable.mapId, mapId)).orderBy(asc(copilotMessagesTable.createdAt));
   await db.insert(copilotMessagesTable).values({ mapId, role: "user", focusCompany: focusCompany ?? null, content: question });
   const blocks = await copilotAnswer({
-    focusCompany: focusCompany ?? "the market", subject,
+    focusCompany: focusCompany ?? "the market", subject, context,
     history: history.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`).join("\n"),
     question,
   });
   await db.insert(copilotMessagesTable).values({ mapId, role: "ai", focusCompany: focusCompany ?? null, content: blocks });
   res.json({ blocks });
+});
+
+/* Suggested starter prompts for the always-on Research Assistant — tailored to
+ * the subject, its problems and (once fenced) its industry. */
+router.get("/competitive-maps/:id/copilot/suggest", async (req, res) => {
+  const me = uid(req, res); if (!me) return;
+  const mapId = Number(req.params.id);
+  const [map] = await db.select().from(competitiveMapsTable).where(eq(competitiveMapsTable.id, mapId)).limit(1);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
+  try {
+    const prompts = await suggestCopilotPrompts(map.companyName, map.overview || {}, map.landscape || {}, map.status);
+    res.json({ prompts });
+  } catch (e) { console.warn("copilot suggest failed", (e as Error).message); res.json({ prompts: [] }); }
 });
 
 export default router;

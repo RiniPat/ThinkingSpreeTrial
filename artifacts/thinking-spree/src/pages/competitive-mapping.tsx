@@ -12,6 +12,7 @@ import {
   Check, ChevronRight, Plus, Building2, Sparkles, X, ArrowRight, RefreshCw,
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
+import { CompanyResearchAssistant } from "@/components/CompanyResearchAssistant";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 const jf = (path: string, opts: any = {}) =>
@@ -27,7 +28,7 @@ const api = {
     return fetch(BASE + "/api/competitive-maps/ingest-deck", { method: "POST", credentials: "include", body: fd })
       .then((r) => { if (!r.ok) throw new Error("ingest-deck " + r.status); return r.json(); });
   },
-  fence: (id: any) => jf(`/api/competitive-maps/${id}/fence`, { method: "POST", body: "{}" }),
+  fence: (id: any, scope: any = {}) => jf(`/api/competitive-maps/${id}/fence`, { method: "POST", body: JSON.stringify(scope) }),
   prioritize: (id: any, selected: any[]) => jf(`/api/competitive-maps/${id}/prioritize`, { method: "POST", body: JSON.stringify({ selected }) }),
   breakdown: (id: any, selected: any[]) => jf(`/api/competitive-maps/${id}/breakdown`, { method: "POST", body: JSON.stringify({ selected }) }),
   job: (jobId: any) => jf(`/api/competitive-maps/jobs/${jobId}`),
@@ -73,6 +74,10 @@ export default function CompetitiveMappingPage() {
   const [sheetUrl, setSheetUrl] = useState<string | null>(null);
   const [needsGoogle, setNeedsGoogle] = useState(false);
   const [landscape, setLandscape] = useState<any>(null);
+  const [geography, setGeography] = useState<string>("India");
+  const [industry, setIndustry] = useState<string>("");
+  const [demandMap, setDemandMap] = useState<any>(null);
+  const [competitiveDoc, setCompetitiveDoc] = useState<any>(null);
   const [selected, setSelected] = useState<any[]>([]);
   const [breakdown, setBreakdown] = useState<Record<string, any[]>>({});
   const [inspiration, setInspiration] = useState<Record<string, any>>({});
@@ -88,6 +93,8 @@ export default function CompetitiveMappingPage() {
       const m = await api.loadMap(id);
       setMapId(m.id); setOverview(m.overview); setSheetUrl(m.sheetUrl);
       setLandscape(m.landscape); setSelected(m.selected || []);
+      setGeography(m.geography || "India"); setIndustry(m.industry || "");
+      setDemandMap(m.demandMap || null); setCompetitiveDoc(m.competitiveDoc || null);
       setBreakdown(m.breakdown || {}); setInspiration(m.inspiration || {});
       const order = ["feed_ready", "fencing", "fenced", "prioritized", "breaking_down", "broken_down", "inspiration", "done"];
       const map: any = { feed_ready: "fencing", fenced: "prioritize", prioritized: "breakdown", broken_down: "inspiration", inspiration: "inspiration", done: "inspiration" };
@@ -174,12 +181,17 @@ export default function CompetitiveMappingPage() {
 
           {stage === "fencing" && (
             <Fencing overview={overview} landscape={landscape} busy={busy}
+              geography={geography} setGeography={setGeography}
+              industry={industry} setIndustry={setIndustry}
+              demandMap={demandMap} competitiveDoc={competitiveDoc}
               onRun={async () => {
                 setErr(null); setBusy(true); setProgress({ pct: 5, msg: "Starting fencing…" });
                 try {
-                  const { jobId } = await api.fence(mapId);
+                  const { jobId } = await api.fence(mapId, { geography, industry });
                   await pollJob(jobId, (j) => setProgress({ pct: j.progress || 0, msg: j.message || "Working…" }));
-                  const m = await api.loadMap(mapId); setLandscape(m.landscape);
+                  const m = await api.loadMap(mapId);
+                  setLandscape(m.landscape); setDemandMap(m.demandMap || null); setCompetitiveDoc(m.competitiveDoc || null);
+                  setGeography(m.geography || geography); setIndustry(m.industry || industry);
                 } catch (e: any) { setErr(e.message || "Fencing failed"); }
                 finally { setBusy(false); setProgress(null); }
               }}
@@ -217,6 +229,7 @@ export default function CompetitiveMappingPage() {
           )}
         </div>
       </div>
+      <CompanyResearchAssistant mapId={mapId} subject={overview?.name} stage={stage} />
       <style>{`.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}`}</style>
     </Layout>
   );
@@ -285,9 +298,38 @@ function DataFeed({ onSubmit, busy, saved, onOpen }: any) {
   );
 }
 
-/* ── Stage 2: Fencing (industry landscape) ──────────────────────────────── */
-function Fencing({ overview, landscape, onRun, onNext, busy }: any) {
+/* ── Stage 2: Fencing (industry landscape + demand map + competitive doc) ──── */
+const GEOS = ["India", "United States", "Southeast Asia", "Europe", "Middle East", "Global"];
+
+function Fencing({ overview, landscape, onRun, onNext, busy, geography, setGeography, industry, setIndustry, demandMap, competitiveDoc }: any) {
   const has = landscape && (landscape.companies?.length || landscape.metrics?.length);
+
+  const ScopePanel = (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>
+        Fence scope
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 12 }}>
+        <div>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Geography</label>
+          <select value={geography} onChange={(e) => setGeography(e.target.value)}
+            style={{ width: "100%", padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 9, fontSize: 14, fontFamily: sans, background: "#fff", boxSizing: "border-box" }}>
+            {GEOS.map((g) => <option key={g} value={g}>{g}</option>)}
+            {geography && !GEOS.includes(geography) && <option value={geography}>{geography}</option>}
+          </select>
+        </div>
+        <div>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Industry / application focus</label>
+          <input value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g. Lab-grown diamond jewellery"
+            style={{ width: "100%", padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 9, fontSize: 14, fontFamily: sans, boxSizing: "border-box" }} />
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+        The AI fences this exact market — the demand map, prices and companies all reflect your chosen geography &amp; industry, and are written to the sheet.
+      </div>
+    </div>
+  );
+
   return (
     <div>
       {overview && (
@@ -299,12 +341,15 @@ function Fencing({ overview, landscape, onRun, onNext, busy }: any) {
           </div>
         </div>
       )}
+
+      {ScopePanel}
+
       {!has ? (
         <div style={{ textAlign: "center", padding: "40px 20px", background: C.card, border: `1px dashed ${C.border}`, borderRadius: 14 }}>
           <Search size={28} color={C.gold} />
           <h3 style={{ fontFamily: serif, fontSize: 22, margin: "12px 0 4px", color: C.navy }}>Fence the industry</h3>
           <p style={{ fontSize: 13, color: C.muted, maxWidth: 460, margin: "0 auto 18px" }}>
-            The AI maps the whole market — quantified metrics plus every company in the space — so you can become an expert fast. The complete per-company breakdown comes later.
+            The AI maps the whole market for <b>{industry || "your industry"}</b> in <b>{geography}</b> — a quantified landscape, an industry demand map and a competitive landscape — so you can become an expert fast.
           </p>
           <button disabled={busy} onClick={onRun}
             style={{ background: C.navy, color: "#fff", border: "none", padding: "12px 22px", borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: busy ? "wait" : "pointer", display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -323,6 +368,10 @@ function Fencing({ overview, landscape, onRun, onNext, busy }: any) {
               </div>
             ))}
           </div>
+
+          <DemandMapView demandMap={demandMap} />
+          <CompetitiveDocView doc={competitiveDoc} />
+
           <div style={{ fontSize: 13, fontWeight: 700, color: C.muted, marginBottom: 10 }}>
             {landscape.companies?.length || 0} companies mapped
           </div>
@@ -343,6 +392,117 @@ function Fencing({ overview, landscape, onRun, onNext, busy }: any) {
             <button onClick={onNext} style={primaryBtn}>Prioritize <ArrowRight size={15} /></button>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/* Industry Mapping — demand/application table + market snapshot. */
+function DemandMapView({ demandMap }: any) {
+  if (!demandMap || !(demandMap.rows?.length || demandMap.snapshot?.length)) return null;
+  const cols = [
+    ["priority", "#"], ["application", "Industry / Application"], ["products", "Products"],
+    ["whyUsed", "Why used"], ["demand", "Est. demand"], ["price", "Typical price"],
+    ["leaders", "Leaders"], ["opportunity", "Opportunity"],
+  ];
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h3 style={{ fontFamily: serif, fontSize: 20, color: C.navy, margin: "0 0 2px" }}>Industry demand map</h3>
+      <p style={{ fontSize: 12, color: C.muted, margin: "0 0 10px" }}>{demandMap.industry ? `${demandMap.industry} · ` : ""}{demandMap.geography}</p>
+      {demandMap.intro && <p style={{ fontSize: 13, color: C.ink, marginBottom: 10 }}>{demandMap.intro}</p>}
+      <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12, marginBottom: 12 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12.5 }}>
+          <thead>
+            <tr style={{ background: C.navy, color: "#fff" }}>
+              {cols.map(([, label]) => <th key={label} style={{ padding: "9px 11px", textAlign: "left", fontWeight: 600, minWidth: 90 }}>{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {demandMap.rows.map((r: any, i: number) => (
+              <tr key={i} style={{ borderTop: `1px solid ${C.border}`, background: i % 2 ? C.faint : "#fff" }}>
+                {cols.map(([k]) => <td key={k} style={cellS}>{r[k] ?? ""}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {demandMap.snapshot?.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 10, marginBottom: 6 }}>
+          {demandMap.snapshot.map((s: any, i: number) => (
+            <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12 }}>
+              <div style={{ fontSize: 11, color: C.muted }}>{s.metric}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: C.navy }}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {demandMap.notes && <div style={{ fontSize: 11, color: C.muted, fontStyle: "italic" }}>{demandMap.notes}</div>}
+    </div>
+  );
+}
+
+/* Competitive Landscape — selection + business canvas + benchmarks + what to build. */
+function CompetitiveDocView({ doc }: any) {
+  if (!doc || !(doc.selection?.length || doc.canvas?.length)) return null;
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <h3 style={{ fontFamily: serif, fontSize: 20, color: C.navy, margin: "0 0 2px" }}>Competitive landscape</h3>
+      <p style={{ fontSize: 12, color: C.muted, margin: "0 0 10px" }}>{doc.industry ? `${doc.industry} · ` : ""}{doc.geography}</p>
+      {doc.logic && <p style={{ fontSize: 13, color: C.ink, marginBottom: 12 }}>{doc.logic}</p>}
+
+      {doc.canvas?.length > 0 && (
+        <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12, marginBottom: 14 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ background: C.navy, color: "#fff" }}>
+                {["Company", "Positioning", "Target", "Model", "Strength", "Weakness", "Learn"].map((h) => (
+                  <th key={h} style={{ padding: "9px 11px", textAlign: "left", fontWeight: 600, minWidth: 110 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {doc.canvas.map((c: any, i: number) => (
+                <tr key={i} style={{ borderTop: `1px solid ${C.border}`, background: i % 2 ? C.faint : "#fff" }}>
+                  <td style={{ ...cellS, fontWeight: 600 }}>{c.company}</td>
+                  <td style={cellS}>{c.positioning}</td><td style={cellS}>{c.target}</td><td style={cellS}>{c.model}</td>
+                  <td style={cellS}>{c.strength}</td><td style={cellS}>{c.weakness}</td><td style={cellS}>{c.learn}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 12, marginBottom: 8 }}>
+        {(doc.observations && (doc.observations.customer?.length || doc.observations.business?.length || doc.observations.pricing)) && (
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 700, color: C.navy, fontSize: 13, marginBottom: 6 }}>Market observations</div>
+            {(doc.observations.customer || []).map((t: string, i: number) => <div key={`c${i}`} style={{ fontSize: 12.5, color: C.ink, marginBottom: 4 }}>• {t}</div>)}
+            {(doc.observations.business || []).map((t: string, i: number) => <div key={`b${i}`} style={{ fontSize: 12.5, color: C.ink, marginBottom: 4 }}>• {t}</div>)}
+            {doc.observations.pricing && <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4 }}>{doc.observations.pricing}</div>}
+          </div>
+        )}
+        {doc.benchmarks?.length > 0 && (
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 700, color: C.navy, fontSize: 13, marginBottom: 6 }}>Top benchmarks</div>
+            {doc.benchmarks.map((b: any, i: number) => (
+              <div key={i} style={{ fontSize: 12.5, color: C.ink, marginBottom: 4 }}>
+                <b>{b.label}:</b> {(b.companies || []).join(", ")}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {doc.whatToBuild?.length > 0 && (
+        <div style={{ background: C.goldSoft, border: `1px solid ${C.gold}`, borderRadius: 10, padding: 14 }}>
+          <div style={{ fontWeight: 700, color: "#7a5a12", fontSize: 13, marginBottom: 8 }}>What to build</div>
+          {doc.whatToBuild.map((w: any, i: number) => (
+            <div key={i} style={{ fontSize: 12.5, color: C.ink, marginBottom: 6 }}>
+              <b>{w.question}:</b> {w.recommendation}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

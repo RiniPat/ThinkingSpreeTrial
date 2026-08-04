@@ -33,8 +33,15 @@ export const competitiveMapsTable = pgTable("competitive_maps", {
   status: text("status").notNull().default("feed_ready"),
   direction: text("direction"),
   overview: jsonb("overview"),
+  /** Fencing scope chosen by the consultant (v3): geography + industry focus. */
+  geography: text("geography"),
+  industry: text("industry"),
   /** Fencing output: { metrics:[{label,value,note}], companies:[{name,website,type,size,hq,note}], summary } */
   landscape: jsonb("landscape"),
+  /** Industry Mapping (v3): demand/application map — rows + market snapshot. */
+  demandMap: jsonb("demand_map"),
+  /** Competitive Landscape doc (v3): selection logic + business canvas + benchmarks. */
+  competitiveDoc: jsonb("competitive_doc"),
   /** Prioritize output: [{name,website,rank}] — the shortlist sent to Breakdown. */
   selected: jsonb("selected"),
   generatedSheetId: text("generated_sheet_id"),

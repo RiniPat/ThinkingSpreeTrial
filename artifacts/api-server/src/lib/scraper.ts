@@ -26,6 +26,7 @@ export type ScrapedPage = {
   ogImage: string;
   favicon: string;
   images: string[]; // ranked, best-first product/content images scraped from the page
+  richImages: { url: string; alt: string; score: number }[]; // same, with alt text for matching
   text: string;
   ok: boolean;
 };
@@ -100,6 +101,9 @@ function stripToText(html: string): string {
 
 /** Junk we never want as a "product image": icons, sprites, tracking pixels, badges. */
 const IMG_BLOCKLIST = /(sprite|icon|favicon|logo|avatar|pixel|spacer|blank|placeholder|1x1|badge|button|arrow|chevron|star|rating|flag|payment|visa|mastercard|amex|paypal|app-?store|google-?play|social|facebook|twitter|linkedin|instagram|youtube|tiktok|loading|spinner|cookie|gdpr)/i;
+/** People/press shots (CEO holding an award, team photos, office): still usable
+ *  but heavily DE-ranked so they never become the default "product" image. */
+const IMG_PEOPLE = /(ceo|founder|team|leadership|management|board|portrait|headshot|people|staff|press|news|award|event|conference|speaker|profile|about-?us|office|building|campus|hero-banner|banner-hero)/i;
 const IMG_EXT_OK = /\.(jpe?g|png|webp|gif|avif)(\?|#|$)/i;
 
 /** Pull the first integer out of a width/height attribute value ("640", "640px", "50%"). */
@@ -115,9 +119,11 @@ function pxOf(v?: string): number {
  * every URL absolute, drops icons/sprites/tracking pixels, and scores what's
  * left by size hints, position on the page, and product-y keywords.
  */
-function extractImages(html: string, baseUrl: string): string[] {
-  const scored = new Map<string, number>(); // url -> best score
-  const add = (rawSrc: string, score: number) => {
+export type RichImage = { url: string; alt: string; score: number };
+
+function extractRich(html: string, baseUrl: string): RichImage[] {
+  const best = new Map<string, { alt: string; score: number }>(); // url -> best
+  const add = (rawSrc: string, score: number, altText = "") => {
     if (!rawSrc) return;
     let src = rawSrc.trim().replace(/&amp;/gi, "&");
     if (!src || src.startsWith("data:") || /\.svg(\?|#|$)/i.test(src)) return; // svg usually = logo/icon
@@ -126,44 +132,55 @@ function extractImages(html: string, baseUrl: string): string[] {
     if (IMG_BLOCKLIST.test(src)) return;
     // Require a real raster extension OR a query-string image endpoint (CDNs often hide ext).
     if (!IMG_EXT_OK.test(src) && !/\/(image|images|img|media|photo|asset|cdn|uploads?)\//i.test(src)) return;
-    const prev = scored.get(src) ?? -Infinity;
-    if (score > prev) scored.set(src, score);
+    // De-rank people/press shots (url or alt) so a CEO-with-award never wins.
+    if (IMG_PEOPLE.test(src) || IMG_PEOPLE.test(altText)) score -= 70;
+    const prev = best.get(src);
+    if (!prev || score > prev.score) best.set(src, { alt: altText.trim().slice(0, 160), score });
   };
 
-  // Social/preview images are usually the hero product shot — rank them high.
+  // Social/preview image: often a hero/press shot, so rank it modestly (NOT top)
+  // and tag it so downstream matching knows it's generic.
   const og = meta(html, "og:image:secure_url", "og:image", "twitter:image", "twitter:image:src");
-  if (og) add(og, 100);
+  if (og) add(og, 55, "og preview");
 
-  // Walk every <img ...> tag; earlier tags (higher on the page) score slightly higher.
   const imgRe = /<img\b[^>]*>/gi;
   let m: RegExpExecArray | null;
   let order = 0;
-  while ((m = imgRe.exec(html)) && order < 200) {
+  while ((m = imgRe.exec(html)) && order < 240) {
     const tag = m[0];
     order++;
-    const positionBonus = Math.max(0, 40 - order); // top-of-page images preferred
+    const positionBonus = Math.max(0, 40 - order);
     const attr = (name: string) =>
       tag.match(new RegExp(`\\b${name}\\s*=\\s*["']([^"']+)["']`, "i"))?.[1] || "";
 
-    // srcset: take the widest candidate.
+    const altRaw = attr("alt");
+    const alt = (altRaw + " " + attr("title") + " " + attr("class") + " " + attr("id")).toLowerCase();
+
     const srcset = attr("srcset") || attr("data-srcset");
     if (srcset) {
-      const best = srcset.split(",")
+      const wide = srcset.split(",")
         .map((s) => { const [u, w] = s.trim().split(/\s+/); return { u, w: pxOf(w) }; })
         .sort((a, b) => b.w - a.w)[0];
-      if (best?.u) add(best.u, 45 + positionBonus + Math.min(30, best.w / 60));
+      if (wide?.u) add(wide.u, 45 + positionBonus + Math.min(30, wide.w / 60), altRaw || alt);
     }
 
     const src = attr("src") || attr("data-src") || attr("data-original") || attr("data-lazy-src");
     const w = pxOf(attr("width")), h = pxOf(attr("height"));
-    if (w && h && (w < 64 || h < 64)) continue; // too small to be a product image
+    if (w && h && (w < 64 || h < 64)) continue;
     const sizeBonus = Math.min(40, Math.max(w, h) / 25);
-    const alt = (attr("alt") + " " + attr("class") + " " + attr("id")).toLowerCase();
-    const keywordBonus = /(product|screenshot|hero|feature|dashboard|app|device|mockup|gallery|banner)/.test(alt) ? 25 : 0;
-    add(src, 40 + positionBonus + sizeBonus + keywordBonus);
+    const keywordBonus = /(product|screenshot|hero|feature|dashboard|app|device|mockup|gallery|catalog|collection|shop|card|pack|deck|box|kit)/.test(alt) ? 25 : 0;
+    add(src, 40 + positionBonus + sizeBonus + keywordBonus, altRaw || alt);
   }
 
-  return [...scored.entries()].sort((a, b) => b[1] - a[1]).map(([u]) => u).slice(0, 8);
+  return [...best.entries()]
+    .map(([url, v]) => ({ url, alt: v.alt, score: v.score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 16);
+}
+
+/** Back-compat: ranked URL list (people shots demoted, best-first). */
+function extractImages(html: string, baseUrl: string): string[] {
+  return extractRich(html, baseUrl).map((i) => i.url).slice(0, 8);
 }
 
 /**
@@ -186,7 +203,7 @@ export async function scrapePage(rawUrl: string): Promise<ScrapedPage> {
   const requestedUrl = normalizeUrl(rawUrl);
   const empty: ScrapedPage = {
     requestedUrl, finalUrl: requestedUrl, domain: domainOf(requestedUrl),
-    title: "", description: "", ogImage: "", favicon: "", images: [], text: "", ok: false,
+    title: "", description: "", ogImage: "", favicon: "", images: [], richImages: [], text: "", ok: false,
   };
   if (!requestedUrl) return empty;
 
@@ -216,11 +233,12 @@ export async function scrapePage(rawUrl: string): Promise<ScrapedPage> {
     if (iconMatch?.[1]) favicon = abs(finalUrl, iconMatch[1]);
     if (!favicon) favicon = abs(finalUrl, "/favicon.ico");
 
-    const images = extractImages(html, finalUrl);
+    const richImages = extractRich(html, finalUrl);
+    const images = richImages.map((i) => i.url).slice(0, 8);
 
     return {
       requestedUrl, finalUrl, domain: domainOf(finalUrl),
-      title, description, ogImage, favicon, images,
+      title, description, ogImage, favicon, images, richImages,
       text: stripToText(html).slice(0, 16000),
       ok: true,
     };

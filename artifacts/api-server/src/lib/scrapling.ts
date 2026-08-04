@@ -35,6 +35,7 @@ export type ScrapedEvidence = {
   description: string;
   text: string;          // merged readable copy across the requested pages
   images: string[];      // ranked, best-first product/content images
+  gallery: { url: string; alt: string }[]; // same, with alt text for per-product matching
   logo: string;          // reliable logo url (Clearbit → favicon)
   pages: string[];       // urls actually visited
 };
@@ -77,6 +78,7 @@ async function viaSidecar(
       description: j.description || "",
       text: (j.text || "").slice(0, 24000),
       images: (j.images || []).filter(Boolean),
+      gallery: (j as any).gallery || (j.images || []).filter(Boolean).map((url: string) => ({ url, alt: "" })),
       logo: j.logo || logoForDomain(domain),
       pages: j.pages || [],
     };
@@ -104,18 +106,24 @@ export async function fetchEvidence(
   if (!start) {
     return {
       company, domain, website: start, ok: false, title: "", description: "",
-      text: "", images: emptyLogo ? [emptyLogo] : [], logo: emptyLogo, pages: [],
+      text: "", images: emptyLogo ? [emptyLogo] : [], gallery: [], logo: emptyLogo, pages: [],
     };
   }
 
   const home = await scrapePage(start).catch(() => null);
   const parts: string[] = [];
   const gallery: string[] = [];
+  const richGallery: { url: string; alt: string }[] = [];
+  const seenRich = new Set<string>();
+  const pushRich = (arr?: { url: string; alt: string }[]) => {
+    for (const im of arr || []) if (im?.url && !seenRich.has(im.url)) { seenRich.add(im.url); richGallery.push({ url: im.url, alt: im.alt || "" }); }
+  };
   const visited: string[] = [];
   if (home?.ok) {
     visited.push(home.finalUrl);
     parts.push(`# ${home.title}\n${home.description}\n${home.text}`);
     for (const im of home.images) if (!gallery.includes(im)) gallery.push(im);
+    pushRich(home.richImages);
   }
 
   // Visit the pages the AI asked for (fail soft, in parallel, capped).
@@ -129,6 +137,7 @@ export async function fetchEvidence(
       visited.push(p.finalUrl);
       parts.push(`## ${p.title}\n${p.text.slice(0, 4000)}`);
       for (const im of p.images) if (!gallery.includes(im)) gallery.push(im);
+      pushRich(p.richImages);
     }
   }
 
@@ -150,6 +159,7 @@ export async function fetchEvidence(
     description: home?.description || "",
     text: parts.join("\n\n").slice(0, 24000),
     images: images.filter(Boolean).slice(0, 10),
+    gallery: richGallery.slice(0, 16),
     logo: logo || emptyLogo,
     pages: visited,
   };

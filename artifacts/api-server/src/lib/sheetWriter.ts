@@ -11,7 +11,7 @@
  */
 import { google } from "googleapis";
 import type { Auth } from "googleapis";
-import { BREAKDOWN_COLUMNS, type Landscape } from "./competitiveMappingAi";
+import { BREAKDOWN_COLUMNS, type Landscape, type DemandMap, type CompetitiveDoc } from "./competitiveMappingAi";
 
 type Sheets = ReturnType<typeof google.sheets>;
 
@@ -200,6 +200,84 @@ export async function writeBreakdownTab(
       },
     }] },
   }).catch(() => {});
+}
+
+/* ── Industry Mapping: demand / application map (v3) ──────────────────────── */
+export async function writeDemandMapTab(
+  auth: Auth.OAuth2Client, spreadsheetId: string, demand: DemandMap,
+) {
+  const sheets = client(auth);
+  const header = [
+    "Priority", "Industry / Application", "Products", "Why It Is Used", "Typical Inclusion %",
+    "Estimated Demand", "Share of Demand", "Demand Outlook", "Market Maturity", "Main Grade / Format",
+    "Typical Price", "Major Customer Type", "Top Geographies", "Leading Companies / Brands",
+    "Buying Criteria", "Demand-Supply Gap", "Opportunity", "Source / Assumption",
+  ];
+  const body = (demand?.rows || []).map((r) => [
+    r.priority ?? "", r.application ?? "", r.products ?? "", r.whyUsed ?? "", r.inclusionPct ?? "",
+    r.demand ?? "", r.share ?? "", r.outlook ?? "", r.maturity ?? "", r.grade ?? "",
+    r.price ?? "", r.customerType ?? "", r.geographies ?? "", r.leaders ?? "",
+    r.buyingCriteria ?? "", r.gap ?? "", r.opportunity ?? "", r.source ?? "",
+  ]);
+  const pad = (row: any[]) => [...row, ...Array(Math.max(0, header.length - row.length)).fill("")];
+  const values: any[][] = [
+    pad([demand?.title || "Industry Demand Map"]),
+    pad([`Scope: ${demand?.industry || "-"} | ${demand?.geography || "-"}`]),
+    demand?.intro ? pad([demand.intro]) : [],
+    [],
+    header,
+    ...body,
+  ];
+  if (demand?.snapshot?.length) {
+    values.push([], pad(["Key Market Snapshot", "Value"]));
+    for (const s of demand.snapshot) values.push(pad([s.metric ?? "", s.value ?? ""]));
+  }
+  if (demand?.notes) values.push([], pad([demand.notes]));
+
+  const title = `Industry Mapping - ${demand?.geography || "Market"}`;
+  const tabId = await ensureTab(sheets, spreadsheetId, title);
+  await writeValues(sheets, spreadsheetId, title, values);
+  await style(sheets, spreadsheetId, tabId, { headerRows: 5, colCount: header.length, rowCount: values.length });
+}
+
+/* ── Competitive Landscape: selection + canvas + benchmarks (v3) ──────────── */
+export async function writeCompetitiveLandscapeTab(
+  auth: Auth.OAuth2Client, spreadsheetId: string, doc: CompetitiveDoc,
+) {
+  const sheets = client(auth);
+  const COLS = 7;
+  const pad = (row: any[]) => [...row, ...Array(Math.max(0, COLS - row.length)).fill("")];
+  const values: any[][] = [
+    pad([doc?.title || "Competitive Landscape"]),
+    pad([`Scope: ${doc?.industry || "-"} | ${doc?.geography || "-"}`]),
+    doc?.logic ? pad([doc.logic]) : [],
+    [],
+    pad(["Rank", "Company", "Why included"]),
+    ...(doc?.selection || []).map((s) => pad([s.rank ?? "", s.company ?? "", s.why ?? ""])),
+    [],
+    pad(["Company", "Positioning", "Target Customer", "Business Model", "Key Strength", "Weakness", "Opportunity to Learn"]),
+    ...(doc?.canvas || []).map((c) => pad([c.company, c.positioning, c.target, c.model, c.strength, c.weakness, c.learn])),
+  ];
+
+  if (doc?.observations) {
+    values.push([], pad(["Market Observations"]));
+    (doc.observations.customer || []).forEach((t) => values.push(pad(["Customer", t])));
+    (doc.observations.business || []).forEach((t) => values.push(pad(["Business model", t])));
+    if (doc.observations.pricing) values.push(pad(["Pricing", doc.observations.pricing]));
+  }
+  if (doc?.benchmarks?.length) {
+    values.push([], pad(["Top Benchmarks", "Companies"]));
+    for (const b of doc.benchmarks) values.push(pad([b.label ?? "", (b.companies || []).join(", ")]));
+  }
+  if (doc?.whatToBuild?.length) {
+    values.push([], pad(["What To Build", "Recommendation"]));
+    for (const w of doc.whatToBuild) values.push(pad([w.question ?? "", w.recommendation ?? ""]));
+  }
+
+  const title = `Competitive Landscape - ${doc?.geography || "Market"}`;
+  const tabId = await ensureTab(sheets, spreadsheetId, title);
+  await writeValues(sheets, spreadsheetId, title, values);
+  await style(sheets, spreadsheetId, tabId, { headerRows: 5, colCount: COLS, rowCount: values.length });
 }
 
 /* ── Inspiration: 6-column journey tab (matches the screenshots) ──────────── */
