@@ -16,3 +16,5 @@ export * from "./calendarSprintMarks";
 export * from "./emailTemplates";
 export * from "./contacts";
 export * from "./competitiveMaps";
+
+export * from "./salesFollowups";

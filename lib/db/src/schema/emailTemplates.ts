@@ -3,21 +3,22 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 /**
- * Consultant-authored email templates for the Emails tab.
+ * Consultant-authored email templates.
  *
- * These are workspace-wide (all 10 consultants share one library) so a
- * template one person adds is immediately usable by the rest of the team.
- * There are no baked-in seed rows — the library starts empty and a template
- * lives until someone explicitly deletes it.
+ * Workspace-wide (all consultants share one library). `kind` scopes a template
+ * to a composer:
+ *   'pre' | 'post'   → Pre-Sprint / Post-Sprint composers (body only)
+ *   'followup'       → Sales · Follow-ups (uses `subject` + `sortOrder` too)
  *
- * `kind` is 'pre' or 'post' so the Pre-Sprint and Post-Sprint composers each
- * show only their relevant templates. `body` is the raw scaffold (with
- * [merge fields] the AI fills in from the sheet + calendar context).
+ * `subject` and `sortOrder` were added in migration 020. They are nullable /
+ * defaulted so existing pre/post rows are unaffected.
  */
 export const emailTemplatesTable = pgTable("email_templates", {
   id: serial("id").primaryKey(),
-  kind: text("kind").notNull(),          // 'pre' | 'post'
+  kind: text("kind").notNull(),          // 'pre' | 'post' | 'followup'
   name: text("name").notNull(),
+  subject: text("subject"),              // used by 'followup'
+  sortOrder: integer("sort_order").notNull().default(0),
   body: text("body").notNull(),
   createdBy: integer("created_by"),      // user id, for attribution only
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -13,33 +13,24 @@
  *
  * Every generator returns strict JSON in the exact shape the front-end renders.
  */
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import {
+  getModel as sharedModel, isGeminiConfigured, MODEL_STANDARD, MODEL_LITE as SHARED_LITE,
+  parseJsonLoose, cacheGet, cacheSet, hashKey, TTL,
+} from "./aiClient";
 
-// Override via env if you want to upgrade later (e.g. CM_MODEL_HEAVY=gemini-2.5-pro)
-export const MODEL_HEAVY = process.env.CM_MODEL_HEAVY?.trim() || "gemini-2.5-flash";
-export const MODEL_LITE = process.env.CM_MODEL_LITE?.trim() || "gemini-2.5-flash-lite";
-const MODEL_SAFE = "gemini-2.5-flash"; // known-good retry target
+// The Fencing search + Research Assistant are the reasoning-heavy tasks, so they
+// run on the STANDARD tier; directions / scrape-planning / prompt seeding are
+// light. Both are env-overridable (e.g. CM_MODEL_HEAVY=gemini-2.5-pro).
+export const MODEL_HEAVY = process.env.CM_MODEL_HEAVY?.trim() || MODEL_STANDARD;
+export const MODEL_LITE = process.env.CM_MODEL_LITE?.trim() || SHARED_LITE;
+const MODEL_SAFE = MODEL_STANDARD; // known-good retry target
 
 export function isConfigured(): boolean {
-  return Boolean(process.env.GEMINI_API_KEY?.trim());
+  return isGeminiConfigured();
 }
 
 function getModel(name: string) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY not set");
-  return new GoogleGenerativeAI(apiKey).getGenerativeModel({
-    model: name,
-    generationConfig: { responseMimeType: "application/json" },
-  });
-}
-
-function parseJson<T>(text: string, fallback: T): T {
-  try {
-    const cleaned = text.replace(/^```json\s*|\s*```$/g, "").trim();
-    return JSON.parse(cleaned) as T;
-  } catch {
-    return fallback;
-  }
+  return sharedModel({ model: name, generationConfig: { responseMimeType: "application/json" } });
 }
 
 function looksLikeBadModel(msg: string): boolean {
@@ -54,27 +45,45 @@ async function callOnce(model: string, text: string): Promise<string> {
   return res.response.text();
 }
 
-async function gen<T>(opts: { model: string; system: string; prompt: string; fallback: T }): Promise<T> {
+async function gen<T>(opts: {
+  model: string; system: string; prompt: string; fallback: T;
+  /** When set, a SUCCESSFUL generation is cached under this key so repeat
+   *  requests for the same subject skip the (expensive) call. Failures that
+   *  fall back are never cached. */
+  cacheKey?: string; ttlMs?: number;
+}): Promise<T> {
   if (!isConfigured()) return opts.fallback;
+
+  if (opts.cacheKey) {
+    const cached = cacheGet<T>(opts.cacheKey);
+    if (cached !== undefined) return cached;
+  }
+
   const payload = `${opts.system}\n\n${opts.prompt}`;
+  // Returns null on any non-recoverable failure so the caller falls back.
+  const attempt = async (model: string): Promise<T | null> =>
+    parseJsonLoose<T | null>(await callOnce(model, payload), null);
+
+  let result: T | null = null;
   try {
-    const out = parseJson<T | null>(await callOnce(opts.model, payload), null as any);
-    return (out ?? opts.fallback) as T;
+    result = await attempt(opts.model);
   } catch (e) {
     const msg = (e as Error).message || "";
     // Retry once on a known-good model if the configured one was rejected.
     if (opts.model !== MODEL_SAFE && looksLikeBadModel(msg)) {
       try {
-        const out = parseJson<T | null>(await callOnce(MODEL_SAFE, payload), null as any);
-        return (out ?? opts.fallback) as T;
+        result = await attempt(MODEL_SAFE);
       } catch (e2) {
         console.warn("[competitiveMappingAi] retry failed, using fallback:", (e2 as Error).message);
-        return opts.fallback;
       }
+    } else {
+      console.warn("[competitiveMappingAi] generation failed, using fallback:", msg);
     }
-    console.warn("[competitiveMappingAi] generation failed, using fallback:", msg);
-    return opts.fallback;
   }
+
+  if (result == null) return opts.fallback;
+  if (opts.cacheKey) cacheSet(opts.cacheKey, result, opts.ttlMs ?? TTL.medium);
+  return result;
 }
 
 /* 1 - Company Overview
@@ -104,6 +113,8 @@ export async function generateOverview(
 
   return gen({
     model: MODEL_HEAVY,
+    cacheKey: hashKey("cm.overview", companyName, website, evidence),
+    ttlMs: TTL.long,
     system:
       "You are a startup research analyst. Produce a factual company overview as STRICT JSON with keys: " +
       "name, tagline, website, founded, hq, stage, " +
@@ -146,6 +157,8 @@ const FENCE_KEYS =
 export async function generateFencing(subject: string, direction: string, overview: any) {
   const rows = await gen<any[]>({
     model: MODEL_HEAVY,
+    cacheKey: hashKey("cm.fencing", subject, direction, overview),
+    ttlMs: TTL.long,
     system:
       `Build a competitive "Fencing" research grid for ${subject}. Surface EVERY notable company solving the ` +
       `same problem, especially those that have SCALED BEYOND ${subject}. Work at the PRODUCT level - a company ` +
@@ -337,6 +350,8 @@ export async function generateLandscape(
     (ind ? `INDUSTRY / APPLICATION FOCUS: ${ind}. Fence THIS space specifically. ` : "");
   const out = await gen<Landscape>({
     model: MODEL_HEAVY,
+    cacheKey: hashKey("cm.landscape", subject, geo, ind, overview, evidence),
+    ttlMs: TTL.long,
     system:
       `You are fencing an industry for a strategy consultant researching "${subject}". ${scopeLine}Produce an INDUSTRY ` +
       `LANDSCAPE as STRICT JSON: { summary, metrics, companies }.\n` +
@@ -419,6 +434,8 @@ export async function generateIndustryDemandMap(
   };
   const out = await gen<DemandMap>({
     model: MODEL_HEAVY,
+    cacheKey: hashKey("cm.demand", subject, geography, industry, overview, evidence),
+    ttlMs: TTL.long,
     system:
       `Act as a McKinsey/Bain analyst building an INDUSTRY DEMAND MAP for "${subject}"'s product` +
       `${industry ? ` in "${industry}"` : ""}, focused on the geography "${geography}". List EVERY notable ` +
@@ -485,6 +502,8 @@ export async function generateCompetitiveLandscape(
   };
   const out = await gen<CompetitiveDoc>({
     model: MODEL_HEAVY,
+    cacheKey: hashKey("cm.competitive", subject, geography, industry, overview, evidence),
+    ttlMs: TTL.long,
     system:
       `Act as a strategy consultant building a COMPETITIVE LANDSCAPE for "${subject}"` +
       `${industry ? ` in "${industry}"` : ""}, focused on "${geography}". Use a balanced mix (market leaders + ` +
@@ -590,6 +609,8 @@ export async function generateBreakdownForCompany(
 ): Promise<any[]> {
   const rows = await gen<any[]>({
     model: MODEL_HEAVY,
+    cacheKey: hashKey("cm.breakdown", subject, company, website, evidence),
+    ttlMs: TTL.long,
     system:
       `Build the deep competitive breakdown ("Industry Decoding") for "${company}" — one row PER PRODUCT — as ` +
       `part of research on "${subject}". Return STRICT JSON: an array of objects with these keys: ${FENCE_KEYS}. ` +

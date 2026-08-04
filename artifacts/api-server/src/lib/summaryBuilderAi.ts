@@ -5,19 +5,15 @@
  * any T-Sheet context). The consultant reviews/edits everything before it's
  * committed, so this is a best-effort first pass — never authoritative.
  *
- * Reuses the same Gemini setup style as growthReportAi.ts (gemini-2.5-flash,
- * JSON response, low temperature for extraction).
+ * This is a pure extraction task ("data pulling"), so it runs on the LITE
+ * model tier (see aiClient.ts) — JSON response, low temperature.
  */
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_LITE, stripJsonFences } from "./aiClient";
 
-const MODEL = "gemini-2.5-flash";
-
-function getModel(temperature: number) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
-  const genai = new GoogleGenerativeAI(apiKey);
-  return genai.getGenerativeModel({
-    model: MODEL,
+function model(temperature: number) {
+  // Transcript field extraction is data-pulling → LITE tier.
+  return getModel({
+    model: MODEL_LITE,
     generationConfig: { temperature, responseMimeType: "application/json" },
   });
 }
@@ -81,10 +77,9 @@ industryDetail and criticalVenture must each be a single short phrase (no senten
 TRANSCRIPT(S):
 ${transcript.slice(0, 28000)}`;
 
-  const m = getModel(0.2);
+  const m = model(0.2);
   const result = await m.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   let parsed: Partial<SummaryAiFields>;
   try {
     parsed = JSON.parse(cleaned) as Partial<SummaryAiFields>;

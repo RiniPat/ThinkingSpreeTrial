@@ -12,6 +12,10 @@ export const usersTable = pgTable("users", {
   avatarUrl: text("avatar_url"),
   // Google's stable subject ID (the "sub" claim) — links a user to a Google account
   googleSub: text("google_sub").unique(),
+  // Follow-up sign-off fields (migration 021). Fill [Title]/[Phone]/[Calendar link].
+  title: text("title"),
+  phone: text("phone"),
+  calendarLink: text("calendar_link"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

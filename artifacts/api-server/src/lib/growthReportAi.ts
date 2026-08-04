@@ -13,25 +13,12 @@
  * report body. Also helps Gemini stay within token limits on dense inputs.
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_LITE, MODEL_STANDARD, stripJsonFences } from "./aiClient";
 
-const MODEL = "gemini-2.5-flash";
-
-function getModel(temperature: number) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
-  const genai = new GoogleGenerativeAI(apiKey);
-  return genai.getGenerativeModel({
-    model: MODEL,
-    generationConfig: { temperature, responseMimeType: "application/json" },
-  });
-}
-
-async function runJson<T>(prompt: string, temperature: number): Promise<T> {
-  const m = getModel(temperature);
+async function runJson<T>(prompt: string, temperature: number, tier: string): Promise<T> {
+  const m = getModel({ model: tier, generationConfig: { temperature, responseMimeType: "application/json" } });
   const result = await m.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   try {
     return JSON.parse(cleaned) as T;
   } catch {
@@ -212,8 +199,9 @@ RAG RUBRIC:
 
 Output the JSON object ONLY. No commentary. No markdown fences.`;
 
-  // Lower temperature — extraction must be faithful, not creative.
-  return runJson<GrowthReportAnchors>(prompt, 0.2);
+  // Lower temperature — extraction must be faithful, not creative. Data-pulling
+  // task → LITE tier.
+  return runJson<GrowthReportAnchors>(prompt, 0.2, MODEL_LITE);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -324,6 +312,7 @@ VERIFY before output:
 - Annexure has exactly 30 rows.
 - No empty string values anywhere.`;
 
-  // Slightly higher temperature — narrative sections need some shaping.
-  return runJson<JourneyReport>(prompt, 0.35);
+  // Slightly higher temperature — narrative sections need some shaping. This is
+  // a reasoning-heavy synthesis → STANDARD tier.
+  return runJson<JourneyReport>(prompt, 0.35, MODEL_STANDARD);
 }

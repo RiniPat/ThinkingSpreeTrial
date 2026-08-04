@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { startFollowupScanScheduler } from "./lib/followupScan";
 
 // Render provides PORT automatically. Locally, default to 5000.
 const port = Number(process.env.PORT ?? 5000);
@@ -14,4 +15,5 @@ app.listen(port, (err) => {
     process.exit(1);
   }
   logger.info({ port }, "Server listening");
+  startFollowupScanScheduler();
 });

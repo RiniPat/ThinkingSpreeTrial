@@ -22,9 +22,9 @@
  * with responseMimeType:"application/json". No extra dependency.
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_STANDARD, stripJsonFences } from "./aiClient";
 
-const MODEL = "gemini-2.5-flash";
+const MODEL = MODEL_STANDARD;
 
 // ──────────────────────── Types (mirrored on the client) ──────────────────
 export type Segment = "peer" | "next_level";
@@ -87,20 +87,13 @@ export interface InspirationRoadmapOutput {
 }
 
 // ──────────────────────── Shared helpers ──────────────────────────────────
-function client() {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the server.");
-  return new GoogleGenerativeAI(apiKey);
-}
-
 async function runJsonPrompt<T>(prompt: string, temperature = 0.35): Promise<T> {
-  const model = client().getGenerativeModel({
+  const model = getModel({
     model: MODEL,
     generationConfig: { temperature, responseMimeType: "application/json" },
   });
   const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   try { return JSON.parse(cleaned) as T; }
   catch { throw new Error(`Gemini returned non-JSON. First 300 chars: ${cleaned.slice(0, 300)}`); }
 }
@@ -117,7 +110,7 @@ function hostOf(url: string): string {
  */
 async function gather(prompt: string, temperature = 0.5): Promise<{ text: string; sources: InspirationSource[] }> {
   try {
-    const model = client().getGenerativeModel({
+    const model = getModel({
       model: MODEL,
       generationConfig: { temperature },
       tools: [{ googleSearch: {} } as any],
@@ -138,7 +131,7 @@ async function gather(prompt: string, temperature = 0.5): Promise<{ text: string
     return { text, sources };
   } catch {
     // Fallback: ungrounded generation, no live citations.
-    const model = client().getGenerativeModel({ model: MODEL, generationConfig: { temperature } });
+    const model = getModel({ model: MODEL, generationConfig: { temperature } });
     const result = await model.generateContent(
       prompt + "\n\n(Note: cite the specific public source by name inline where you can; if a fact isn't reliably known, say \"Not publicly disclosed\".)",
     );

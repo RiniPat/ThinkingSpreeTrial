@@ -24,6 +24,7 @@ import preSprintRouter from "./preSprint";
 import emailWorkspaceRouter from "./emailWorkspace";
 import contactsRouter from "./contacts";
 import competitiveMappingRouter from "./competitiveMapping";
+import salesFollowupsRouter from "./salesFollowups";
 
 const router: IRouter = Router();
 
@@ -52,5 +53,6 @@ router.use(preSprintRouter);
 router.use(emailWorkspaceRouter);
 router.use(contactsRouter);
 router.use(competitiveMappingRouter);
+router.use(salesFollowupsRouter);
 
 export default router;

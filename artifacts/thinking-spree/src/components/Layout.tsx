@@ -46,7 +46,7 @@ const navItems: NavItem[] = [
     href: "/post-sprint", label: "Post-Sprint", icon: Flag,
     match: ["/summary", "/builder", "/reports/outcomes", "/sprint-tracking"],
   },
-  { href: "/sales", label: "Sales", icon: Users, needsInboxCrm: true, match: ["/sales"] },
+  { href: "/sales", label: "Sales", icon: Users, needsSales: true, match: ["/sales"] },
   { href: "/admin", label: "Admin", icon: Shield, adminOnly: true, match: ["/admin/"] },
 ];
 
