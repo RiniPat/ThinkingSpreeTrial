@@ -171,6 +171,12 @@ function buildErrorMessage(response: Response, data: unknown): string {
   return prefix;
 }
 
+/**
+ * Thrown by {@link customFetch} for any non-2xx response. Carries the parsed
+ * error body (`data`), the originating `Response`, and the request `method`/
+ * `url`. The message is built from RFC 7807 `title`/`detail` fields when
+ * present, otherwise a `message`/`error` field, falling back to the status line.
+ */
 export class ApiError<T = unknown> extends Error {
   readonly name = "ApiError";
   readonly status: number;
@@ -199,6 +205,11 @@ export class ApiError<T = unknown> extends Error {
   }
 }
 
+/**
+ * Thrown by {@link customFetch} when a 2xx response advertises JSON but the
+ * body fails to parse. Preserves the unparsed `rawBody` and the underlying
+ * parse error as `cause` for diagnostics.
+ */
 export class ResponseParseError extends Error {
   readonly name = "ResponseParseError";
   readonly status: number;
@@ -322,6 +333,23 @@ async function parseSuccessBody(
   }
 }
 
+/**
+ * The single transport every generated API endpoint calls through.
+ *
+ * On top of the platform `fetch` it adds: base-URL resolution for relative
+ * paths, automatic `content-type: application/json` for JSON string bodies,
+ * a default `accept` header for JSON responses, optional bearer-token
+ * injection (see {@link setAuthTokenGetter}), and content-negotiated body
+ * parsing driven by `responseType` (`"auto"` infers json/text/blob from the
+ * response `content-type`).
+ *
+ * On a non-2xx response it throws {@link ApiError}; on a malformed JSON body
+ * it throws {@link ResponseParseError}. A resolved value is the parsed body
+ * typed as `T` (or `null` for empty/no-body responses).
+ *
+ * @throws {TypeError} if a GET/HEAD request is given a body, or a blob
+ *   response is requested in a runtime without `Response.blob`.
+ */
 export async function customFetch<T = unknown>(
   input: RequestInfo | URL,
   options: CustomFetchOptions = {},

@@ -1,3 +1,13 @@
+/**
+ * Toast state management (adapted from shadcn/ui).
+ *
+ * A single module-level store drives all toasts app-wide: `toast()` can be
+ * called from anywhere (including outside React) to enqueue one, while the
+ * `useToast()` hook subscribes a component to the current toast list for
+ * rendering. `TOAST_LIMIT` caps how many are shown at once and the (large,
+ * intentional) `TOAST_REMOVE_DELAY` keeps a dismissed toast mounted briefly so
+ * its exit animation can play before removal.
+ */
 import * as React from "react"
 
 import type {
@@ -139,6 +149,11 @@ function dispatch(action: Action) {
 
 type Toast = Omit<ToasterToast, "id">
 
+/**
+ * Imperatively show a toast from anywhere (event handlers, async callbacks,
+ * non-React code). Returns the toast `id` plus `dismiss()` and `update()`
+ * controls for that specific toast.
+ */
 function toast({ ...props }: Toast) {
   const id = genId()
 
@@ -168,6 +183,12 @@ function toast({ ...props }: Toast) {
   }
 }
 
+/**
+ * Subscribe a component to the shared toast store. Re-renders when toasts are
+ * added, updated, or dismissed, and returns the current `toasts` array along
+ * with the `toast()` enqueue helper and a `dismiss(id?)` control (omit `id` to
+ * dismiss all).
+ */
 function useToast() {
   const [state, setState] = React.useState<State>(memoryState)
 
