@@ -10,32 +10,18 @@
  * frontend exactly what to expect.
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_STANDARD, stripJsonFences } from "./aiClient";
 import { brandSummaryForPrompt } from "./brandContext";
 
-const MODEL = "gemini-2.5-flash";
-
 // ──────────────────────── Shared helpers ──────────────────────────────────
-function getModel() {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured on the server.");
-  }
-  const genai = new GoogleGenerativeAI(apiKey);
-  return genai.getGenerativeModel({
-    model: MODEL,
-    generationConfig: {
-      temperature: 0.5,             // research → moderate creativity, faithful to facts
-      responseMimeType: "application/json",
-    },
-  });
-}
-
 async function runJsonPrompt<T>(prompt: string): Promise<T> {
-  const model = getModel();
+  // Research-analysis tools → STANDARD tier; moderate temperature, faithful.
+  const model = getModel({
+    model: MODEL_STANDARD,
+    generationConfig: { temperature: 0.5, responseMimeType: "application/json" },
+  });
   const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   try {
     return JSON.parse(cleaned) as T;
   } catch {

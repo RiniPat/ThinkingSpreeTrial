@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_LITE, stripJsonFences, cacheGet, cacheSet, hashKey, TTL } from "./aiClient";
 
 /**
  * Coarse role buckets. Kept as a small, stable set so the distribution bar,
@@ -63,12 +63,9 @@ export function heuristicRole(email: string, domain?: string | null): Classifica
   return null;                       // company domain — defer to AI
 }
 
-let genai: GoogleGenerativeAI | null = null;
 function model() {
-  const key = process.env.GEMINI_API_KEY?.trim();
-  if (!key) throw new Error("GEMINI_API_KEY is not configured on the server.");
-  genai = genai || new GoogleGenerativeAI(key);
-  return genai.getGenerativeModel({ model: "gemini-2.5-flash", generationConfig: { temperature: 0.1, responseMimeType: "application/json" } });
+  // Contact classification is a data-pulling task → LITE tier.
+  return getModel({ model: MODEL_LITE, generationConfig: { temperature: 0.1, responseMimeType: "application/json" } });
 }
 
 /**
@@ -83,6 +80,22 @@ export async function classifyContactsBatch(contacts: ContactInput[]): Promise<C
     return `${i}. ${c.name || "(no name)"} <${c.email}>${subj ? ` — subjects: ${subj}` : ""}`;
   }).join("\n");
 
+  // Re-syncing an inbox re-sends the same contacts; cache a SUCCESSFUL batch so
+  // an unchanged batch never pays for a second classification call. A failed
+  // classification (the low-confidence fallback) is never cached, so a transient
+  // API error doesn't get pinned for hours.
+  const key = hashKey("contacts", list);
+  const cached = cacheGet<Classification[]>(key);
+  if (cached) return cached;
+
+  const { ok, result } = await classifyRaw(contacts, list);
+  if (ok) cacheSet(key, result, TTL.long);
+  return result;
+}
+
+async function classifyRaw(
+  contacts: ContactInput[], list: string,
+): Promise<{ ok: boolean; result: Classification[] }> {
   const prompt = `You classify business contacts from a startup consultancy's email inbox. For each contact pick ONE coarse role bucket AND a short specific label.
 
 COARSE ROLES:
@@ -109,8 +122,7 @@ confidence is 0-1. Be honest — prefer "other" with low confidence over guessin
 
   try {
     const res = await model().generateContent(prompt);
-    const txt = res.response.text().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-    const arr = JSON.parse(txt) as any[];
+    const arr = JSON.parse(stripJsonFences(res.response.text())) as any[];
     const out: Classification[] = contacts.map(() => ({ role: "other", confidence: 0.3 }));
     for (const item of arr) {
       const i = Number(item?.i);
@@ -124,10 +136,10 @@ confidence is 0-1. Be honest — prefer "other" with low confidence over guessin
         };
       }
     }
-    return out;
+    return { ok: true, result: out };
   } catch {
     // On failure, default everything to a low-confidence 'other' so the sync
-    // still completes; the user can re-classify or re-run.
-    return contacts.map(() => ({ role: "other", confidence: 0.2, reason: "Unclassified" }));
+    // still completes; the user can re-classify or re-run. ok:false → not cached.
+    return { ok: false, result: contacts.map(() => ({ role: "other", confidence: 0.2, reason: "Unclassified" })) };
   }
 }

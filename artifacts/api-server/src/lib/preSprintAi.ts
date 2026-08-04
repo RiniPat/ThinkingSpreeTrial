@@ -16,9 +16,9 @@
  *   ungrounded pass (sources:[]) if the grounding tool call throws.
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_LITE, MODEL_STANDARD, stripJsonFences } from "./aiClient";
 
-const MODEL = "gemini-2.5-flash";
+const MODEL = MODEL_STANDARD;
 
 // State/UT names MUST match the GeoJSON `NAME_1` property so the choropleth can
 // join on them. This is the canonical list from india-states.geojson.
@@ -46,20 +46,13 @@ export interface CompanyProfile {
 }
 
 // ──────────────────────── Shared helpers ──────────────────────────────────
-function client() {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the server.");
-  return new GoogleGenerativeAI(apiKey);
-}
-
-async function runJson<T>(prompt: string, temperature = 0.4): Promise<T> {
-  const model = client().getGenerativeModel({
-    model: MODEL,
+async function runJson<T>(prompt: string, temperature = 0.4, tier: string = MODEL): Promise<T> {
+  const model = getModel({
+    model: tier,
     generationConfig: { temperature, responseMimeType: "application/json" },
   });
   const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   try { return JSON.parse(cleaned) as T; }
   catch { throw new Error(`Gemini returned non-JSON. First 300 chars: ${cleaned.slice(0, 300)}`); }
 }
@@ -71,7 +64,7 @@ function hostOf(url: string): string {
 /** Grounded gather with graceful fallback (mirrors researchAi.inspiration). */
 async function gather(prompt: string, temperature = 0.5): Promise<{ text: string; sources: Source[] }> {
   try {
-    const model = client().getGenerativeModel({
+    const model = getModel({
       model: MODEL,
       generationConfig: { temperature },
       tools: [{ googleSearch: {} } as any],
@@ -91,7 +84,7 @@ async function gather(prompt: string, temperature = 0.5): Promise<{ text: string
     if (!text?.trim()) throw new Error("empty grounded response");
     return { text, sources };
   } catch {
-    const model = client().getGenerativeModel({ model: MODEL, generationConfig: { temperature } });
+    const model = getModel({ model: MODEL, generationConfig: { temperature } });
     const result = await model.generateContent(
       prompt + '\n\n(Note: name the specific public source inline where you can; if a fact is not reliably known, say "Not publicly disclosed" — never invent figures.)',
     );
@@ -131,7 +124,8 @@ Return JSON ONLY:
   "revenueStage": "e.g. Pre-revenue / <₹50L ARR / ₹1-5Cr ARR (only if stated)",
   "geography": "primary markets if stated"
 }`;
-  return runJson<CompanyProfile>(prompt, 0.2);
+  // Reading a deck to pre-fill a form is data-pulling → LITE tier.
+  return runJson<CompanyProfile>(prompt, 0.2, MODEL_LITE);
 }
 
 // ═══════════════════ 2) Company Overview (snapshot) ════════════════════════

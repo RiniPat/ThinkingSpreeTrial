@@ -13,7 +13,10 @@
  * cleanup. If Gemini ever wraps in fences anyway, we strip them defensively.
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import {
+  getModel, isGeminiConfigured as isConfigured, MODEL_LITE, MODEL_STANDARD,
+  stripJsonFences, parseJsonLoose, memoAsync, hashKey, TTL,
+} from "./aiClient";
 
 export type EmailKind = "pre" | "post";
 
@@ -201,20 +204,17 @@ Return only the JSON object.`;
 
 // ──────────────────────── Public API ───────────────────────────────────────
 export async function isGeminiConfigured(): Promise<boolean> {
-  return Boolean(process.env.GEMINI_API_KEY?.trim());
+  return isConfigured();
 }
 
 export async function generateEmail(kind: EmailKind, ctx: EmailContext, templateOverride?: string | null): Promise<GeneratedEmail> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
+  if (!isConfigured()) {
     throw new Error("GEMINI_API_KEY is not configured on the server. Add it in the Render env vars.");
   }
 
-  const genai = new GoogleGenerativeAI(apiKey);
-  const model = genai.getGenerativeModel({
-    // gemini-2.5-flash is fast (~2s) and free-tier eligible. Switch to
-    // gemini-2.5-pro for higher quality if quota allows.
-    model: "gemini-2.5-flash",
+  // Email drafting is quality-sensitive → STANDARD tier.
+  const model = getModel({
+    model: MODEL_STANDARD,
     generationConfig: {
       temperature: 0.7,
       responseMimeType: "application/json",
@@ -226,7 +226,7 @@ export async function generateEmail(kind: EmailKind, ctx: EmailContext, template
 
   // Defensive cleanup — strip code fences if Gemini ignored responseMimeType
   // (it sometimes does on edge inputs).
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(text);
 
   let parsed: { subject?: string; body?: string };
   try {
@@ -270,20 +270,23 @@ export async function summariseVision(input: {
   founderName: string;
   rawAbout: string;
 }): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
+  if (!isConfigured()) {
     throw new Error("GEMINI_API_KEY is not configured on the server.");
   }
   if (!input.rawAbout?.trim()) {
     throw new Error("Nothing to summarise — the About Startup tab appears to be empty.");
   }
 
-  const genai = new GoogleGenerativeAI(apiKey);
-  const model = genai.getGenerativeModel({
-    model: "gemini-2.5-flash",
+  const about = input.rawAbout.slice(0, 4000);
+  // Faithful summary of stable input → cache so repeated Vision-card renders for
+  // the same company don't re-hit the API.
+  return memoAsync(hashKey("vision", input.companyName, about), TTL.long, async () => {
+
+  // Data-pulling / summarisation → LITE tier, low temperature for a faithful
+  // (not creative) summary.
+  const model = getModel({
+    model: MODEL_LITE,
     generationConfig: {
-      // Lower temperature than email drafting — we want a faithful summary,
-      // not creative writing.
       temperature: 0.3,
       responseMimeType: "application/json",
     },
@@ -296,7 +299,7 @@ FOUNDER: ${input.founderName}
 
 RAW ABOUT-THE-STARTUP CONTENT (from the consultant's sheet):
 """
-${input.rawAbout.slice(0, 4000)}
+${about}
 """
 
 RULES
@@ -312,11 +315,10 @@ RULES
 
   const result = await model.generateContent(prompt);
   const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
 
   let parsed: { vision?: string };
   try {
-    parsed = JSON.parse(cleaned);
+    parsed = JSON.parse(stripJsonFences(text));
   } catch {
     // Best-effort fallback — if Gemini ignored JSON mode and returned plain
     // text, use the text directly (trimmed and bounded to 500 chars).
@@ -326,6 +328,7 @@ RULES
     throw new Error(`Gemini returned no vision field. Raw: ${text.slice(0, 200)}`);
   }
   return parsed.vision.trim();
+  });
 }
 
 /**
@@ -343,21 +346,24 @@ export async function extractSheetProfile(sheetText: string): Promise<{
   founderName: string | null;
   cohort: string | null;
 }> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
+  if (!isConfigured()) {
     throw new Error("GEMINI_API_KEY is not configured on the server.");
   }
-  const genai = new GoogleGenerativeAI(apiKey);
-  const model = genai.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
-  });
+  const content = sheetText.slice(0, 8000);
+  const empty = { companyName: null, founderName: null, cohort: null };
 
-  const prompt = `You are reading a startup's "T-Sheet" (a Google Sheet used by Thinking Spree consultants). Extract these fields.
+  // Pure field extraction over stable sheet text → LITE tier + cache.
+  return memoAsync(hashKey("sheetProfile", content), TTL.long, async () => {
+    const model = getModel({
+      model: MODEL_LITE,
+      generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
+    });
+
+    const prompt = `You are reading a startup's "T-Sheet" (a Google Sheet used by Thinking Spree consultants). Extract these fields.
 
 SHEET CONTENT (flattened cells, may be noisy):
 """
-${sheetText.slice(0, 8000)}
+${content}
 """
 
 Return JSON ONLY, no fences: { "companyName": string|null, "founderName": string|null, "cohort": string|null }
@@ -369,18 +375,13 @@ RULES
 4. If a field genuinely isn't present, use null. Do NOT invent values.
 5. Trim whitespace. No commentary.`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  try {
-    const parsed = JSON.parse(cleaned) as Record<string, string | null>;
+    const result = await model.generateContent(prompt);
+    const parsed = parseJsonLoose<Record<string, string | null>>(result.response.text(), empty);
     const clean = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
     return {
       companyName: clean(parsed.companyName),
       founderName: clean(parsed.founderName),
       cohort: clean(parsed.cohort),
     };
-  } catch {
-    return { companyName: null, founderName: null, cohort: null };
-  }
+  });
 }

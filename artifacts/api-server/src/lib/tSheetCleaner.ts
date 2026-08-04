@@ -19,7 +19,7 @@
  * (https://www.googleapis.com/auth/spreadsheets), so no new consent is needed.
  */
 import { google, type sheets_v4 } from "googleapis";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, MODEL_LITE, stripJsonFences } from "./aiClient";
 import { getAuthedClient } from "./google";
 import { extractSheetId } from "./sheetsFetcher";
 
@@ -221,12 +221,10 @@ const ACTION_HEADINGS = [
   "Actions Taken So Far", "Tasks/Recommendation",
 ] as const;
 
-function getModel(temperature: number) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the server.");
-  const genai = new GoogleGenerativeAI(apiKey);
-  return genai.getGenerativeModel({
-    model: "gemini-2.5-flash",
+function cleanerModel(temperature: number) {
+  // Transcript → structured phrases is a data-pulling task → LITE tier.
+  return getModel({
+    model: MODEL_LITE,
     generationConfig: { temperature, responseMimeType: "application/json" },
   });
 }
@@ -273,10 +271,9 @@ Return STRICT JSON, nothing else:
 TRANSCRIPT:
 ${transcript.slice(0, 28000)}`;
 
-  const m = getModel(0.25);
+  const m = cleanerModel(0.25);
   const result = await m.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   let parsed: any;
   try { parsed = JSON.parse(cleaned); }
   catch { throw new Error(`The AI returned malformed output. First 300 chars: ${cleaned.slice(0, 300)}`); }
@@ -391,10 +388,9 @@ RULES:
 LOOSE LINES:
 ${orphans.map((o, i) => `${i + 1}. ${o}`).join("\n").slice(0, 12000)}`;
 
-  const m = getModel(0.2);
+  const m = cleanerModel(0.2);
   const result = await m.generateContent(prompt);
-  const text = result.response.text();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const cleaned = stripJsonFences(result.response.text());
   let parsed: any;
   try { parsed = JSON.parse(cleaned); } catch { return []; }
   const groups = Array.isArray(parsed?.groups) ? parsed.groups

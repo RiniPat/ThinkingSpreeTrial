@@ -10,7 +10,7 @@
  */
 
 import mammoth from "mammoth";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getModel, isGeminiConfigured, MODEL_STANDARD } from "./aiClient";
 
 /**
  * OCR a PDF (or image) by handing the raw bytes to Gemini's multimodal model
@@ -19,13 +19,12 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
  * Returns "" if Gemini isn't configured or finds no text.
  */
 async function ocrWithGemini(buffer: Buffer, mimeType: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) return "";
+  if (!isGeminiConfigured()) return "";
   // Gemini inline data has a request-size ceiling (~20MB incl. encoding); skip
   // very large files rather than erroring.
   if (buffer.byteLength > 14 * 1024 * 1024) return "";
-  const genai = new GoogleGenerativeAI(apiKey);
-  const model = genai.getGenerativeModel({ model: "gemini-2.5-flash" });
+  // OCR/vision transcription is quality-sensitive → STANDARD tier.
+  const model = getModel({ model: MODEL_STANDARD });
   const result = await model.generateContent([
     { inlineData: { mimeType, data: buffer.toString("base64") } },
     { text: "Transcribe ALL text content from this document, preserving the reading order and structure (headings, bullets, tables as text). Output only the transcribed text with no commentary, labels, or markdown fences." },
