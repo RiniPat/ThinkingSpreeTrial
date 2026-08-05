@@ -69,10 +69,11 @@ router.get("/research/outputs", async (req, res) => {
     const tool = req.query.tool ? String(req.query.tool) : null;
     const founderId = req.query.founderId ? Number(req.query.founderId) : null;
 
-    // Research outputs are visible to all research/consultant/admin users.
-    // Sales role doesn't see this list.
+    // Each consultant only sees the outputs THEY generated — a run's data is
+    // private to its author. Newest first, so the most recent is at the top.
     let rows = await db.select().from(researchOutputsTable)
       .where(and(
+        eq(researchOutputsTable.userId, me.id),
         tool ? eq(researchOutputsTable.tool, tool) : undefined,
         founderId && Number.isFinite(founderId) ? eq(researchOutputsTable.founderId, founderId) : undefined,
       ))
@@ -142,7 +143,8 @@ router.get("/research/outputs/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {
-    const [row] = await db.select().from(researchOutputsTable).where(eq(researchOutputsTable.id, id)).limit(1);
+    const [row] = await db.select().from(researchOutputsTable)
+      .where(and(eq(researchOutputsTable.id, id), eq(researchOutputsTable.userId, me.id))).limit(1);
     if (!row) { res.status(404).json({ error: "Not found" }); return; }
     res.json({ output: row });
   } catch (err) {
@@ -163,7 +165,8 @@ router.patch("/research/outputs/:id", async (req, res) => {
   if (req.body?.output) patch.output = req.body.output;
 
   try {
-    await db.update(researchOutputsTable).set(patch).where(eq(researchOutputsTable.id, id));
+    await db.update(researchOutputsTable).set(patch)
+      .where(and(eq(researchOutputsTable.id, id), eq(researchOutputsTable.userId, me.id)));
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "Patch research output failed");
@@ -177,7 +180,8 @@ router.delete("/research/outputs/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {
-    await db.delete(researchOutputsTable).where(eq(researchOutputsTable.id, id));
+    await db.delete(researchOutputsTable)
+      .where(and(eq(researchOutputsTable.id, id), eq(researchOutputsTable.userId, me.id)));
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "Delete research output failed");

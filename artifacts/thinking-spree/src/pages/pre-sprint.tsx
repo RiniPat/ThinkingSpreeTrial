@@ -2,9 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import { Layout } from "@/components/Layout";
-import {
-  Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger,
-} from "@/components/ui/sheet";
+import { SavedRunsDrawer } from "@/components/SavedRunsDrawer";
 import { useToast } from "@/hooks/use-toast";
 import {
   Rocket, Upload, FileText, Wand2, Loader2, Sparkles, Plus, Trash2, Check,
@@ -63,7 +61,6 @@ export default function PreSprintPage() {
   const [tab, setTab] = useState<TabKey>(
     initialTab && PRE_TABS.some((t) => t.key === initialTab) ? initialTab : "overview",
   );
-  const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -84,7 +81,13 @@ export default function PreSprintPage() {
   });
   const companies = companiesQ.data?.companies ?? [];
 
-  function openCompany(cid: number) { setSelectedId(cid); setTab("overview"); setDrawerOpen(false); }
+  function openCompany(cid: number) { setSelectedId(cid); setTab("overview"); }
+
+  async function deleteCompany(cid: number) {
+    await fetch(api(`/pre-sprint/companies/${cid}`), { method: "DELETE", credentials: "include" }).catch(() => {});
+    if (selectedId === cid) { setSelectedId(null); setTab("overview"); }
+    qc.invalidateQueries({ queryKey: ["pre-sprint-companies"] });
+  }
 
   return (
     <Layout>
@@ -100,57 +103,26 @@ export default function PreSprintPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {/* Saved companies moved off-canvas into a slide-over: the workspace
-                now gets the full width, and the list is one click away when the
-                consultant actually wants to switch companies. */}
-            <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
-              <SheetTrigger asChild>
-                <button
-                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-foreground/20">
-                  <Layers size={15} className="text-muted-foreground" />
-                  Saved companies
-                  {companies.length > 0 && (
-                    <span className="ml-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
-                      {companies.length}
-                    </span>
-                  )}
-                </button>
-              </SheetTrigger>
-              <SheetContent side="right" className="w-[340px] sm:w-[380px]">
-                <SheetHeader>
-                  <SheetTitle className="font-serif text-2xl">Saved companies</SheetTitle>
-                </SheetHeader>
-                <div className="mt-4 space-y-1.5 overflow-y-auto pr-1" style={{ maxHeight: "calc(100vh - 180px)" }}>
-                  {companies.length === 0 && !companiesQ.isLoading && (
-                    <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-                      Nothing saved yet. Start a new company and fill the form — it saves here automatically.
-                    </div>
-                  )}
-                  {companies.map((c) => {
-                    const active = selectedId === c.id;
-                    return (
-                      <button key={c.id} onClick={() => openCompany(c.id)}
-                        className="flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors"
-                        style={{ borderColor: active ? "var(--gold)" : "hsl(var(--border))", background: active ? "hsl(36 65% 96%)" : "hsl(var(--card))" }}>
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md" style={{ background: "hsl(36 65% 94%)" }}>
-                          <Rocket size={13} style={{ color: "hsl(30 55% 40%)" }} />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate font-medium text-foreground">{c.companyName}</span>
-                          {c.industry && <span className="block truncate text-xs text-muted-foreground">{c.industry}</span>}
-                        </span>
-                        {active && <Check size={14} style={{ color: GOLD }} />}
-                      </button>
-                    );
-                  })}
-                </div>
-                <button onClick={() => { setSelectedId(null); setTab("overview"); setDrawerOpen(false); }}
-                  className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold"
-                  style={{ background: GOLD, color: "hsl(222 38% 15%)" }}>
-                  <Plus size={15} /> New company
-                </button>
-              </SheetContent>
-            </Sheet>
+            {/* Saved companies live behind a shared, subtle slide-over (the same
+                component every workspace tab uses) so the workspace keeps the
+                full width and past companies stay one click away. */}
+            <SavedRunsDrawer
+              triggerLabel="Saved companies"
+              title="Saved companies"
+              emptyText="Nothing saved yet. Start a new company and fill the form — it saves here automatically."
+              loading={companiesQ.isLoading}
+              searchable
+              items={companies.map((c) => ({
+                id: c.id,
+                title: c.companyName,
+                subtitle: c.industry || undefined,
+                active: selectedId === c.id,
+              }))}
+              onOpen={(id) => openCompany(Number(id))}
+              onDelete={(id) => deleteCompany(Number(id))}
+              newLabel="New company"
+              onNew={() => { setSelectedId(null); setTab("overview"); }}
+            />
             <button onClick={() => { setSelectedId(null); setTab("overview"); }}
               className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold"
               style={{ background: GOLD, color: "hsl(222 38% 15%)" }}>

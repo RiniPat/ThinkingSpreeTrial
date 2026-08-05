@@ -9,10 +9,11 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   FileText, Search, ListOrdered, Layers, Route, Loader2, ExternalLink,
-  Check, ChevronRight, Plus, Building2, Sparkles, X, ArrowRight, RefreshCw,
+  Check, ChevronRight, Plus, Building2, Sparkles, X, ArrowRight, RefreshCw, Trash2,
 } from "lucide-react";
 import { Layout } from "@/components/Layout";
 import { CompanyResearchAssistant } from "@/components/CompanyResearchAssistant";
+import { SavedRunsDrawer } from "@/components/SavedRunsDrawer";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 const jf = (path: string, opts: any = {}) =>
@@ -23,6 +24,7 @@ const api = {
   createMap: (b: any) => jf("/api/competitive-maps", { method: "POST", body: JSON.stringify(b) }),
   listMaps: () => jf("/api/competitive-maps"),
   loadMap: (id: any) => jf(`/api/competitive-maps/${id}`),
+  deleteMap: (id: any) => jf(`/api/competitive-maps/${id}`, { method: "DELETE" }),
   ingestDeck: (file: File) => {
     const fd = new FormData(); fd.append("file", file);
     return fetch(BASE + "/api/competitive-maps/ingest-deck", { method: "POST", credentials: "include", body: fd })
@@ -42,6 +44,13 @@ const C = {
 };
 const serif = "'Instrument Serif', Georgia, serif";
 const sans = "'Inter', ui-sans-serif, system-ui, sans-serif";
+
+/** Human-friendly labels for the persisted run status (used in history lists). */
+const STATUS_LABEL: Record<string, string> = {
+  feed_ready: "Overview ready", fencing: "Fencing…", fenced: "Fenced",
+  prioritized: "Prioritized", breaking_down: "Breaking down…",
+  broken_down: "Broken down", inspiration: "Inspiration", done: "Complete",
+};
 
 const STAGES = [
   { key: "feed", label: "Data Feed", icon: FileText, human: true },
@@ -86,7 +95,24 @@ export default function CompetitiveMappingPage() {
   const [progress, setProgress] = useState<{ pct: number; msg: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => { api.listMaps().then((r) => setSaved(r?.maps || [])).catch(() => {}); }, []);
+  const refreshSaved = () => api.listMaps().then((r) => setSaved(r?.maps || [])).catch(() => {});
+  useEffect(() => { refreshSaved(); }, []);
+
+  /* Reset back to a blank "new run" — used after deleting the run in view. */
+  const resetRun = () => {
+    setMapId(null); setOverview(null); setSheetUrl(null); setNeedsGoogle(false);
+    setLandscape(null); setDemandMap(null); setCompetitiveDoc(null);
+    setSelected([]); setBreakdown({}); setInspiration({});
+    setGeography("India"); setIndustry(""); setStage("feed");
+  };
+
+  const deleteRun = async (id: number) => {
+    try {
+      await api.deleteMap(id);
+      setSaved((cur) => cur.filter((s) => s.id !== id));
+      if (mapId === id) resetRun();
+    } catch (e: any) { setErr(e?.message || "Failed to delete run"); }
+  };
 
   const openRun = async (id: number) => {
     try {
@@ -114,12 +140,31 @@ export default function CompetitiveMappingPage() {
                 Competitive Mapping{overview?.name ? <> · <span style={{ fontStyle: "italic" }}>{overview.name}</span></> : ""}
               </h1>
             </div>
-            {sheetUrl && (
-              <a href={sheetUrl} target="_blank" rel="noreferrer"
-                 style={{ display: "inline-flex", alignItems: "center", gap: 8, background: C.success, color: "#fff", padding: "10px 16px", borderRadius: 10, textDecoration: "none", fontWeight: 600, fontSize: 14 }}>
-                <ExternalLink size={16} /> Open Research Sheet
-              </a>
-            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <SavedRunsDrawer
+                triggerLabel="Past research"
+                title="Your competitive maps"
+                emptyText="No competitive maps yet. Start one from the Data Feed."
+                items={saved.map((s: any) => ({
+                  id: s.id,
+                  title: s.companyName,
+                  subtitle: s.tagline || s.website || undefined,
+                  meta: STATUS_LABEL[s.status] || s.status,
+                  logo: s.logo,
+                  active: s.id === mapId,
+                }))}
+                onOpen={(id) => openRun(Number(id))}
+                onDelete={(id) => deleteRun(Number(id))}
+                newLabel="New competitive map"
+                onNew={resetRun}
+              />
+              {sheetUrl && (
+                <a href={sheetUrl} target="_blank" rel="noreferrer"
+                   style={{ display: "inline-flex", alignItems: "center", gap: 8, background: C.success, color: "#fff", padding: "10px 16px", borderRadius: 10, textDecoration: "none", fontWeight: 600, fontSize: 14 }}>
+                  <ExternalLink size={16} /> Open Research Sheet
+                </a>
+              )}
+            </div>
           </div>
 
           {/* Stage ribbon */}
@@ -167,13 +212,13 @@ export default function CompetitiveMappingPage() {
           )}
 
           {stage === "feed" && (
-            <DataFeed saved={saved} busy={busy} onOpen={openRun}
+            <DataFeed saved={saved} busy={busy} onOpen={openRun} onDelete={deleteRun} activeId={mapId}
               onSubmit={async (form) => {
                 setErr(null); setBusy(true);
                 try {
                   const r = await api.createMap(form);
                   setMapId(r.id); setOverview(r.overview); setSheetUrl(r.sheetUrl); setNeedsGoogle(!!r.needsGoogle);
-                  setStage("fencing");
+                  setStage("fencing"); refreshSaved();
                 } catch (e: any) { setErr(e.message || "Data Feed failed"); }
                 finally { setBusy(false); }
               }} />
@@ -236,7 +281,7 @@ export default function CompetitiveMappingPage() {
 }
 
 /* ── Stage 1: Data Feed ─────────────────────────────────────────────────── */
-function DataFeed({ onSubmit, busy, saved, onOpen }: any) {
+function DataFeed({ onSubmit, busy, saved, onOpen, onDelete, activeId }: any) {
   const [form, setForm] = useState({ companyName: "", website: "", tsheetUrl: "", deck: "", deckText: "" });
   const [uploading, setUploading] = useState(false);
   const ok = form.companyName.trim() && form.website.trim() && form.tsheetUrl.trim();
@@ -282,17 +327,28 @@ function DataFeed({ onSubmit, busy, saved, onOpen }: any) {
       <div>
         <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Your saved research</div>
         {(!saved || !saved.length) && <div style={{ fontSize: 13, color: C.muted }}>No runs yet.</div>}
-        {(saved || []).map((s: any) => (
-          <div key={s.id} onClick={() => onOpen(s.id)}
-            style={{ display: "flex", alignItems: "center", gap: 10, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", marginBottom: 8, cursor: "pointer" }}>
-            {s.logo ? <img src={s.logo} style={{ width: 26, height: 26, borderRadius: 6, objectFit: "contain" }} /> : <Building2 size={20} color={C.muted} />}
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.companyName}</div>
-              <div style={{ fontSize: 11, color: C.muted }}>{s.status}</div>
+        {(saved || []).map((s: any) => {
+          const active = s.id === activeId;
+          return (
+            <div key={s.id}
+              style={{ display: "flex", alignItems: "center", gap: 10, background: active ? C.goldSoft : C.card, border: `1px solid ${active ? C.gold : C.border}`, borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+              <div onClick={() => onOpen(s.id)} style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1, cursor: "pointer" }}>
+                {s.logo ? <img src={s.logo} style={{ width: 26, height: 26, borderRadius: 6, objectFit: "contain" }} /> : <Building2 size={20} color={C.muted} />}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.companyName}</div>
+                  <div style={{ fontSize: 11, color: C.muted }}>{STATUS_LABEL[s.status] || s.status}</div>
+                </div>
+              </div>
+              {onDelete && (
+                <button title="Delete run"
+                  onClick={(e) => { e.stopPropagation(); if (confirm(`Delete the competitive map for ${s.companyName}? This cannot be undone.`)) onDelete(s.id); }}
+                  style={{ background: "none", border: "none", padding: 6, borderRadius: 8, cursor: "pointer", color: C.muted, display: "inline-flex" }}>
+                  <Trash2 size={15} />
+                </button>
+              )}
             </div>
-            <ChevronRight size={15} color={C.muted} style={{ marginLeft: "auto" }} />
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -511,14 +567,33 @@ function CompetitiveDocView({ doc }: any) {
 /* ── Stage 3: Prioritize ────────────────────────────────────────────────── */
 function Prioritize({ landscape, selected, setSelected, onConfirm, onBack, busy }: any) {
   const companies = landscape?.companies || [];
+  const [customName, setCustomName] = useState("");
+  const [customSite, setCustomSite] = useState("");
+
   const isSel = (name: string) => selected.some((s: any) => s.name === name);
   const toggle = (c: any) => setSelected((cur: any[]) =>
     cur.some((s) => s.name === c.name) ? cur.filter((s) => s.name !== c.name)
       : [...cur, { name: c.name, website: c.website, rank: cur.length + 1 }]);
+  const removeByName = (name: string) => setSelected((cur: any[]) => cur.filter((s) => s.name !== name));
+
+  const addCustom = () => {
+    const name = customName.trim();
+    if (!name) return;
+    // Skip duplicates (case-insensitive) so a name already on the list isn't added twice.
+    if (selected.some((s: any) => s.name.toLowerCase() === name.toLowerCase())) { setCustomName(""); setCustomSite(""); return; }
+    const website = customSite.trim();
+    setSelected((cur: any[]) => [...cur, { name, website: website || undefined, rank: cur.length + 1, custom: true }]);
+    setCustomName(""); setCustomSite("");
+  };
+
+  // Companies the consultant typed in (not present in the fenced landscape).
+  const inLandscape = (name: string) => companies.some((c: any) => c.name.toLowerCase() === name.toLowerCase());
+  const customSelected = selected.filter((s: any) => !inLandscape(s.name));
+
   return (
     <div>
       <h2 style={{ fontFamily: serif, fontSize: 24, color: C.navy, margin: "0 0 4px" }}>Shortlist for breakdown</h2>
-      <p style={{ fontSize: 13, color: C.muted, margin: "0 0 18px" }}>Pick the 7–10 companies worth a deep decode. Selected: {selected.length}</p>
+      <p style={{ fontSize: 13, color: C.muted, margin: "0 0 18px" }}>Pick the 7–10 companies worth a deep decode — or add your own below. Selected: {selected.length}</p>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: 10, marginBottom: 22 }}>
         {companies.map((c: any, i: number) => {
           const on = isSel(c.name);
@@ -536,6 +611,38 @@ function Prioritize({ landscape, selected, setSelected, onConfirm, onBack, busy 
           );
         })}
       </div>
+
+      {/* Consultant-supplied companies — added straight to the breakdown shortlist. */}
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 22 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Add your own companies</div>
+        <p style={{ fontSize: 12, color: C.muted, margin: "0 0 12px" }}>
+          Know a competitor the fence missed? Add it here and it goes into the next step's deep breakdown alongside your picks.
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input value={customName} onChange={(e) => setCustomName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustom(); } }}
+            placeholder="Company name"
+            style={{ flex: "1 1 200px", padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 9, fontSize: 14, fontFamily: sans, boxSizing: "border-box" }} />
+          <input value={customSite} onChange={(e) => setCustomSite(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustom(); } }}
+            placeholder="Website (optional)"
+            style={{ flex: "1 1 200px", padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 9, fontSize: 14, fontFamily: sans, boxSizing: "border-box" }} />
+          <button onClick={addCustom} disabled={!customName.trim()} style={{ ...primaryBtn, opacity: customName.trim() ? 1 : 0.5 }}>
+            <Plus size={15} /> Add
+          </button>
+        </div>
+        {customSelected.length > 0 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+            {customSelected.map((s: any, i: number) => (
+              <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: C.goldSoft, border: `1px solid ${C.gold}`, borderRadius: 999, padding: "6px 10px 6px 12px", fontSize: 13, fontWeight: 600, color: C.ink }}>
+                {s.name}
+                <X size={14} style={{ cursor: "pointer" }} onClick={() => removeByName(s.name)} />
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div style={{ display: "flex", gap: 10 }}>
         <button onClick={onBack} style={ghostBtn}>Back</button>
         <button onClick={onConfirm} disabled={!selected.length || busy} style={{ ...primaryBtn, opacity: selected.length ? 1 : 0.5 }}>

@@ -1,13 +1,12 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import { Layout } from "@/components/Layout";
-import { Skeleton } from "@/components/ui/skeleton";
+import { SavedRunsDrawer } from "@/components/SavedRunsDrawer";
 import { useToast } from "@/hooks/use-toast";
 import {
   Sparkles, Users, Target, BarChart3, Globe, Layers,
-  Loader2, Trash2, RefreshCw, Search, ChevronRight, Eye,
-  Lightbulb, Wrench,
+  Loader2, Lightbulb, Wrench,
 } from "lucide-react";
 import InspirationTab from "./InspirationTab";
 
@@ -297,7 +296,6 @@ export default function ResearchPage() {
   const [title, setTitle] = useState("");
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [viewing, setViewing] = useState<any | null>(null);
-  const [search, setSearch] = useState("");
 
   const tool = TOOLS.find(t => t.key === activeTool)!;
 
@@ -346,12 +344,6 @@ export default function ResearchPage() {
     },
   });
 
-  const filteredOutputs = useMemo(() => {
-    const outputs = listData?.outputs ?? [];
-    if (!search.trim()) return outputs;
-    return outputs.filter(o => o.title.toLowerCase().includes(search.toLowerCase()));
-  }, [listData, search]);
-
   return (
     <Layout>
       <main className="flex-1 space-y-6 px-6 py-8 lg:px-10 max-w-[1400px] mx-auto">
@@ -389,29 +381,51 @@ export default function ResearchPage() {
 
         {section === "tools" && (
         <>
-        {/* Tool tabs */}
-        <div className="flex items-center gap-1 border-b border-border overflow-x-auto">
-          {TOOLS.map(t => (
-            <button
-              key={t.key}
-              onClick={() => { setActiveTool(t.key); setInputs({}); setTitle(""); setViewing(null); }}
-              className={
-                "flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap " +
-                (activeTool === t.key
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground")
-              }
-            >
-              <t.Icon className="h-3.5 w-3.5" />
-              {t.label}
-            </button>
-          ))}
+        {/* Tool tabs + the shared, subtle "saved outputs" drawer on the right —
+            the same history surface every workspace tab uses. */}
+        <div className="flex items-end justify-between gap-3 border-b border-border">
+          <div className="flex items-center gap-1 overflow-x-auto">
+            {TOOLS.map(t => (
+              <button
+                key={t.key}
+                onClick={() => { setActiveTool(t.key); setInputs({}); setTitle(""); setViewing(null); }}
+                className={
+                  "flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap " +
+                  (activeTool === t.key
+                    ? "border-primary text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground")
+                }
+              >
+                <t.Icon className="h-3.5 w-3.5" />
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <div className="shrink-0 pb-1.5">
+            <SavedRunsDrawer
+              triggerLabel="Saved outputs"
+              title={`Saved · ${tool.label}`}
+              searchable
+              loading={isLoading}
+              emptyText={`No saved ${tool.label.toLowerCase()} outputs yet — generate one on the left.`}
+              items={(listData?.outputs ?? []).map((o) => ({
+                id: o.id,
+                title: o.title,
+                meta: new Date(o.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }),
+                active: viewing?.id === o.id,
+              }))}
+              onOpen={(id) => {
+                const o = (listData?.outputs ?? []).find((x) => x.id === Number(id));
+                if (o) setViewing(o);
+              }}
+              onDelete={(id) => deleteMutation.mutate(Number(id))}
+            />
+          </div>
         </div>
 
-        {/* Generator + library two-column on lg+ */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          {/* Generator */}
-          <section className="lg:col-span-2 rounded-xl border border-border bg-card p-5">
+        {/* Generator */}
+        <div className="max-w-2xl">
+          <section className="rounded-xl border border-border bg-card p-5">
             <div className="flex items-center gap-2.5">
               <div className={`rounded-md p-2 ${tool.accent}`}>
                 <tool.Icon className="h-4 w-4" />
@@ -467,65 +481,6 @@ export default function ResearchPage() {
                 {generateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {generateMutation.isPending ? "Generating with AI…" : "Generate"}
               </button>
-            </div>
-          </section>
-
-          {/* Library */}
-          <section className="lg:col-span-3 rounded-xl border border-border bg-card p-5">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <h2 className="font-serif text-xl text-foreground">Library</h2>
-              <div className="relative w-full max-w-xs">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                <input
-                  type="text"
-                  placeholder="Search saved outputs"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 bg-background border border-input rounded-md text-xs"
-                />
-              </div>
-            </div>
-
-            <div className="mt-4">
-              {isLoading ? (
-                <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 rounded-md" />)}</div>
-              ) : filteredOutputs.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground">
-                  No saved {tool.label.toLowerCase()} outputs yet. Use the form on the left.
-                </p>
-              ) : (
-                <ul className="space-y-1.5">
-                  {filteredOutputs.map(o => (
-                    <li key={o.id}>
-                      <div className="flex items-center gap-2 rounded-md border border-border bg-background hover:bg-muted/40 px-3 py-2 transition">
-                        <button
-                          onClick={() => setViewing(o)}
-                          className="min-w-0 flex-1 text-left"
-                        >
-                          <div className="text-sm font-medium text-foreground truncate">{o.title}</div>
-                          <div className="text-[11px] text-muted-foreground">
-                            {new Date(o.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                          </div>
-                        </button>
-                        <button
-                          onClick={() => setViewing(o)}
-                          className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                          title="View"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => { if (confirm("Delete this output?")) deleteMutation.mutate(o.id); }}
-                          className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                          title="Delete"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
             </div>
           </section>
         </div>
