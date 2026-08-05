@@ -62,8 +62,10 @@ function profileFromRow(row: any): CompanyProfile {
 router.get("/pre-sprint/companies", async (req, res) => {
   const me = await getMe(req, res); if (!me) return;
   try {
+    // A consultant only sees the Pre-Sprint companies THEY created. Newest
+    // first, so the most recent run is at the top of the list.
     const rows = await db.select().from(foundersTable)
-      .where(eq(foundersTable.source, "pre_sprint"))
+      .where(and(eq(foundersTable.source, "pre_sprint"), eq(foundersTable.ownerId, me.id)))
       .orderBy(desc(foundersTable.createdAt));
     res.json({ companies: rows });
   } catch (err) {
@@ -106,7 +108,8 @@ router.get("/pre-sprint/companies/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {
-    const [company] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    const [company] = await db.select().from(foundersTable)
+      .where(and(eq(foundersTable.id, id), eq(foundersTable.ownerId, me.id))).limit(1);
     if (!company) { res.status(404).json({ error: "Not found" }); return; }
     const outputs = await db.select().from(researchOutputsTable)
       .where(eq(researchOutputsTable.founderId, id))
@@ -140,7 +143,8 @@ router.patch("/pre-sprint/companies/:id", async (req, res) => {
 
   if (Object.keys(patch).length === 0) { res.json({ ok: true, noop: true }); return; }
   try {
-    await db.update(foundersTable).set(patch).where(eq(foundersTable.id, id));
+    await db.update(foundersTable).set(patch)
+      .where(and(eq(foundersTable.id, id), eq(foundersTable.ownerId, me.id)));
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "Autosave pre-sprint company failed");
@@ -154,6 +158,10 @@ router.delete("/pre-sprint/companies/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {
+    // Only the owner may delete — verify before touching any rows.
+    const [owned] = await db.select({ id: foundersTable.id }).from(foundersTable)
+      .where(and(eq(foundersTable.id, id), eq(foundersTable.ownerId, me.id))).limit(1);
+    if (!owned) { res.status(404).json({ error: "Not found" }); return; }
     await db.delete(researchOutputsTable).where(eq(researchOutputsTable.founderId, id));
     await db.delete(foundersTable).where(eq(foundersTable.id, id));
     res.json({ ok: true });
@@ -186,7 +194,7 @@ router.post("/pre-sprint/extract", upload.single("file"), async (req, res) => {
     if (companyId && Number.isFinite(companyId)) {
       await db.update(foundersTable)
         .set({ deckText, websiteUrl: websiteUrl || undefined, preSprintProfile: profile as any })
-        .where(eq(foundersTable.id, companyId));
+        .where(and(eq(foundersTable.id, companyId), eq(foundersTable.ownerId, me.id)));
     }
     res.json({ profile, deckChars: deckText.length, websiteChars: websiteText.length });
   } catch (err: any) {
@@ -214,7 +222,8 @@ router.post("/pre-sprint/companies/:id/generate", async (req, res) => {
   if (!isResearchTool(tool)) { res.status(400).json({ error: "Unknown tool" }); return; }
 
   try {
-    const [company] = await db.select().from(foundersTable).where(eq(foundersTable.id, id)).limit(1);
+    const [company] = await db.select().from(foundersTable)
+      .where(and(eq(foundersTable.id, id), eq(foundersTable.ownerId, me.id))).limit(1);
     if (!company) { res.status(404).json({ error: "Company not found" }); return; }
     const p = profileFromRow(company);
     if (!p.companyName) { res.status(400).json({ error: "Fill the company profile first" }); return; }

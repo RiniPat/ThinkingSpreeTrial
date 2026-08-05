@@ -20,6 +20,7 @@ import { Router } from "express";
 import multer from "multer";
 import {
   db, competitiveMapsTable, mapProductsTable, mapInspirationTable, copilotMessagesTable,
+  mapJobsTable, mapBmcTable,
 } from "@workspace/db";
 import { eq, and, asc, desc } from "drizzle-orm";
 import XLSX from "xlsx";
@@ -360,6 +361,29 @@ router.get("/competitive-maps/:id", async (req, res) => {
     demandMap: map.demandMap ?? null, competitiveDoc: map.competitiveDoc ?? null,
     breakdown: byCompany, inspiration: inspMap, sheetUrl: map.generatedSheetUrl,
   });
+});
+
+/* ── Delete a saved run (owner-scoped, cascades all child rows) ──────────────*/
+router.delete("/competitive-maps/:id", async (req, res) => {
+  const me = uid(req, res); if (!me) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "bad id" }); return; }
+  // loadMap enforces consultant ownership — a run you don't own reads as 404.
+  const map = await loadMap(me, id);
+  if (!map) { res.status(404).json({ error: "not found" }); return; }
+  try {
+    // Child rows key off map_id (no hard FKs), so remove them explicitly first.
+    await db.delete(mapBmcTable).where(eq(mapBmcTable.mapId, id));
+    await db.delete(mapProductsTable).where(eq(mapProductsTable.mapId, id));
+    await db.delete(mapInspirationTable).where(eq(mapInspirationTable.mapId, id));
+    await db.delete(copilotMessagesTable).where(eq(copilotMessagesTable.mapId, id));
+    await db.delete(mapJobsTable).where(eq(mapJobsTable.mapId, id));
+    await db.delete(competitiveMapsTable).where(eq(competitiveMapsTable.id, id));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("delete competitive map failed", e);
+    res.status(500).json({ error: "Failed to delete" });
+  }
 });
 
 /* ── Research Copilot (saved chat) — surfaced on the dashboard ───────────────*/
