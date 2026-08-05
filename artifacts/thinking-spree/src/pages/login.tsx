@@ -4,10 +4,28 @@ import { useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import { loginRequest } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { Eye, EyeOff, Lock, Mail, Loader2, ShieldCheck, CalendarClock, Files } from "lucide-react";
-import logoPath from "@assets/thinkingspree_logo_1778683092464.jpg";
+import { Eye, EyeOff, Lock, Mail, Loader2 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+/* ────────────────────────────────────────────────────────────────────────
+   Thinking Spree — sign-in (editorial rebrand).
+   Warm ivory canvas · charcoal ink · Newsreader serif · Archivo display.
+   The layout mirrors the approved design; all auth wiring (email/password,
+   Google OAuth, redirects) is unchanged from the previous page.
+   ──────────────────────────────────────────────────────────────────────── */
+
+const HANDS = `${BASE}/ts-hands.png`;
+
+// Palette lifted straight from the design spec.
+const C = {
+  page: "#F5F2EC", leftBg: "#FAF8F3", leftBorder: "#E7E2D8",
+  ink: "#26262B", ink2: "#111827", muted: "#6C685E", faint: "#A19C90",
+  footFaint: "#A8A398", cardBorder: "#E5E7EB", inputBorder: "#D1D5DB",
+  label: "#111827", sub: "#4B5563", grey: "#6B7280", submit: "#22222A",
+};
+const SANS = "'Archivo', ui-sans-serif, system-ui, sans-serif";
+const SERIF = "'Newsreader', Georgia, 'Times New Roman', serif";
 
 export default function LoginPage() {
   const [, setLocation] = useLocation();
@@ -54,9 +72,7 @@ export default function LoginPage() {
   async function handleGoogle() {
     setGoogleLoading(true);
     try {
-      const res = await customFetch<{ url: string }>(`${BASE}/api/auth/google/start`, {
-        credentials: "include",
-      });
+      const res = await customFetch<{ url: string }>(`${BASE}/api/auth/google/start`, { credentials: "include" });
       window.location.href = res.url;
     } catch (err: any) {
       toast({
@@ -68,154 +84,126 @@ export default function LoginPage() {
     }
   }
 
+  const wordmark = (fontSize: number) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontFamily: SANS, fontWeight: 900, fontStyle: "italic", fontSize, lineHeight: 0.9, letterSpacing: "-0.03em", color: C.ink, textTransform: "uppercase" }}>
+        Thinking<br />Spree
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 11.5, fontWeight: 800, letterSpacing: "0.32em", color: C.faint }}>
+        CONSULTANT SUITE
+      </div>
+    </div>
+  );
+
   return (
-    <div className="grid min-h-screen bg-background lg:grid-cols-[1.05fr_0.95fr]">
-      <section className="app-auth-visual relative hidden overflow-hidden p-10 text-white lg:flex lg:flex-col lg:justify-between">
-        <div className="app-auth-pattern absolute inset-0" />
-        <div className="relative flex items-center gap-3">
-          <div className="rounded-md bg-white p-2 shadow-sm">
-            <img src={logoPath} alt="Thinking Spree" className="h-10 w-auto" />
-          </div>
-          <div>
-            <div className="font-serif text-2xl">Thinking Spree</div>
-            <div className="text-xs uppercase tracking-[0.22em] text-white/55">Consultant Suite</div>
+    <div className="tsl-root" style={{ display: "flex", minHeight: "100vh", width: "100%", background: C.page, fontFamily: SANS }}>
+      {/* ───────────────── LEFT · ivory hands panel ───────────────── */}
+      <div className="tsl-left" style={{ flex: "1.05", minWidth: 0, position: "relative", display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "60px 60px 44px", background: C.leftBg, borderRight: `1px solid ${C.leftBorder}` }}>
+        <div className="tsl-dots" style={{ position: "absolute", inset: 0, backgroundImage: `radial-gradient(${C.ink} 0.6px, transparent 0.6px)`, backgroundSize: "30px 30px", opacity: 0.04, pointerEvents: "none" }} />
+
+        <div style={{ position: "relative" }}>{wordmark(58)}</div>
+
+        <div style={{ position: "relative", display: "flex", justifyContent: "center", alignItems: "center", margin: "8px 0" }}>
+          <div style={{ position: "relative", width: "100%", maxWidth: 600 }}>
+            <img src={HANDS} alt="Michelangelo's Creation of Adam, cropped to the two reaching hands"
+                 style={{ display: "block", width: "100%", height: "auto" }}
+                 onError={(e: any) => { e.currentTarget.style.display = "none"; }} />
           </div>
         </div>
 
-        <div className="relative max-w-xl">
-          <div className="mb-5 inline-flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.07] px-3 py-1.5 text-xs font-medium text-white/80">
-            <span className="h-2 w-2 rounded-full" style={{ background: "var(--gold)" }} />
-            Sprint workflow automation
-          </div>
-          <h1 className="font-serif text-5xl leading-tight">A calmer command center for every sprint.</h1>
-          <p className="mt-4 max-w-lg text-sm leading-6 text-white/68">
+        <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 14, maxWidth: 540 }}>
+          <h1 style={{ margin: 0, fontFamily: SERIF, fontWeight: 500, fontSize: 46, lineHeight: 1.04, letterSpacing: "-0.015em", color: C.ink }}>
+            A calmer command center for every sprint.
+          </h1>
+          <p style={{ margin: 0, fontSize: 15.5, lineHeight: 1.6, color: C.muted, fontWeight: 500, maxWidth: 460 }}>
             Sync companies, schedule work, generate outreach, and keep outcomes moving from one focused workspace.
           </p>
-          <div className="mt-8 grid max-w-lg grid-cols-3 gap-3">
-            {[
-              { icon: CalendarClock, label: "Calendar aware" },
-              { icon: Files, label: "Sheet driven" },
-              { icon: ShieldCheck, label: "Team gated" },
-            ].map(({ icon: Icon, label }) => (
-              <div key={label} className="rounded-md border border-white/10 bg-white/[0.07] p-3">
-                <Icon className="h-4 w-4 text-white/75" />
-                <div className="mt-3 text-xs font-medium text-white/80">{label}</div>
-              </div>
-            ))}
+          <div style={{ marginTop: 14, fontSize: 12, fontWeight: 700, letterSpacing: "0.06em", color: C.footFaint }}>
+            Internal workspace access only
           </div>
         </div>
+      </div>
 
-        <div className="relative text-xs text-white/45">Internal workspace access only</div>
-      </section>
+      {/* ───────────────── RIGHT · sign-in form ───────────────── */}
+      <div className="tsl-right" style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 48, background: "#FFFFFF" }}>
+        <div style={{ width: "100%", maxWidth: 452 }}>
+          {/* Compact wordmark for narrow screens where the left panel is hidden */}
+          <div className="tsl-mobilebrand" style={{ display: "none", marginBottom: 28 }}>{wordmark(40)}</div>
 
-      <section className="flex min-h-screen items-center justify-center px-4 py-10 sm:px-6">
-        <div className="w-full max-w-md">
-          <div className="app-card rounded-xl bg-card p-7 sm:p-8">
-            <div className="mb-7 text-center lg:hidden">
-              <div className="mx-auto inline-flex rounded-md bg-white p-2 shadow-sm ring-1 ring-border">
-                <img src={logoPath} alt="Thinking Spree" className="h-10 w-auto" />
-              </div>
-              <h1 className="mt-4 font-serif text-3xl text-foreground">Thinking Spree</h1>
-              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Consultant Suite</p>
-            </div>
+          <form onSubmit={handleSubmit} style={{ background: "#FFFFFF", border: `1px solid ${C.cardBorder}`, borderRadius: 20, padding: "44px 44px 36px", boxShadow: "0 30px 70px -34px rgba(17,24,39,0.18)" }}>
+            <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.22em", color: C.grey }}>WELCOME BACK</div>
+            <h2 style={{ margin: "10px 0 8px", fontFamily: SERIF, fontWeight: 500, fontSize: 38, lineHeight: 1.05, letterSpacing: "-0.01em", color: C.ink2 }}>Sign in to continue</h2>
+            <p style={{ margin: "0 0 26px", fontSize: 15, color: C.sub, fontWeight: 500 }}>Use your Thinking Spree workspace account.</p>
 
-            <div className="mb-6">
-              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Welcome back</div>
-              <h2 className="mt-2 font-serif text-3xl text-foreground">Sign in to continue</h2>
-              <p className="mt-1 text-sm text-muted-foreground">Use your Thinking Spree workspace account.</p>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleGoogle}
-              disabled={googleLoading}
-              className="flex w-full items-center justify-center gap-3 rounded-md border border-border bg-white px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-60"
-            >
-              {googleLoading ? (
-                <Loader2 className="h-5 w-5 animate-spin" />
-              ) : (
-                <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4" />
-                  <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853" />
-                  <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05" />
-                  <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335" />
-                </svg>
+            {/* Google */}
+            <button type="button" onClick={handleGoogle} disabled={googleLoading}
+              className="tsl-google"
+              style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: 15, background: "#FFFFFF", border: `1px solid ${C.inputBorder}`, borderRadius: 12, fontFamily: SANS, fontSize: 15.5, fontWeight: 700, color: C.ink2, cursor: googleLoading ? "wait" : "pointer" }}>
+              {googleLoading ? <Loader2 size={19} className="tsl-spin" /> : (
+                <svg width="19" height="19" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"></path><path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"></path><path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.211 35.091 26.715 36 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"></path><path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.087 5.571.001-.001.002-.001.003-.002l6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"></path></svg>
               )}
-              <span>{googleLoading ? "Redirecting..." : "Continue with Google"}</span>
+              {googleLoading ? "Redirecting…" : "Continue with Google"}
             </button>
 
-            <div className="my-5 flex items-center gap-3">
-              <div className="h-px flex-1 bg-border" />
-              <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">or with email</span>
-              <div className="h-px flex-1 bg-border" />
+            {/* divider */}
+            <div style={{ display: "flex", alignItems: "center", gap: 16, margin: "26px 0" }}>
+              <div style={{ flex: 1, height: 1, background: C.cardBorder }} />
+              <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.18em", color: C.grey }}>OR WITH EMAIL</span>
+              <div style={{ flex: 1, height: 1, background: C.cardBorder }} />
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label htmlFor="email" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Work Email
-                </label>
-                <div className="relative">
-                  <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    id="email"
-                    data-testid="input-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@thinkingspree.com"
-                    required
-                    className="app-input w-full rounded-md border py-2.5 pl-9 pr-4 text-sm text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20"
-                  />
-                </div>
-              </div>
+            {/* email */}
+            <label htmlFor="email" style={{ display: "block", fontSize: 12, fontWeight: 800, letterSpacing: "0.12em", color: C.label, marginBottom: 9 }}>WORK EMAIL</label>
+            <div className="tsl-field" style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 14px", border: `1px solid ${C.inputBorder}`, borderRadius: 12, background: "#FFFFFF", marginBottom: 20 }}>
+              <Mail size={18} style={{ color: C.grey, flexShrink: 0 }} />
+              <input id="email" data-testid="input-email" type="email" required value={email}
+                onChange={(e) => setEmail(e.target.value)} placeholder="you@thinkingspree.com" autoComplete="username"
+                style={{ flex: 1, border: "none", background: "transparent", padding: "15px 0", fontFamily: SANS, fontSize: 15, fontWeight: 500, color: C.ink2, outline: "none" }} />
+            </div>
 
-              <div>
-                <label htmlFor="password" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Password
-                </label>
-                <div className="relative">
-                  <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    id="password"
-                    data-testid="input-password"
-                    type={showPassword ? "text" : "password"}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter your password"
-                    required
-                    className="app-input w-full rounded-md border py-2.5 pl-9 pr-10 text-sm text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-sm text-muted-foreground transition hover:text-foreground"
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                  >
-                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
-                </div>
-              </div>
-
-              <button
-                data-testid="button-submit"
-                type="submit"
-                disabled={loading}
-                className="app-button-primary mt-2 w-full rounded-md px-4 py-2.5 text-sm font-semibold text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loading ? "Signing in..." : "Sign in with password"}
+            {/* password */}
+            <label htmlFor="password" style={{ display: "block", fontSize: 12, fontWeight: 800, letterSpacing: "0.12em", color: C.label, marginBottom: 9 }}>PASSWORD</label>
+            <div className="tsl-field" style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 14px", border: `1px solid ${C.inputBorder}`, borderRadius: 12, background: "#FFFFFF" }}>
+              <Lock size={18} style={{ color: C.grey, flexShrink: 0 }} />
+              <input id="password" data-testid="input-password" type={showPassword ? "text" : "password"} required value={password}
+                onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" autoComplete="current-password"
+                style={{ flex: 1, border: "none", background: "transparent", padding: "15px 0", fontFamily: SANS, fontSize: 15, fontWeight: 500, color: C.ink2, outline: "none" }} />
+              <button type="button" onClick={() => setShowPassword(!showPassword)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 4, background: "none", border: "none", cursor: "pointer", color: C.grey }}>
+                {showPassword ? <EyeOff size={19} /> : <Eye size={19} />}
               </button>
-            </form>
+            </div>
 
-            <p className="mt-6 text-center text-xs leading-relaxed text-muted-foreground">
-              Access restricted to @thinkingspree.com accounts. New here?{" "}
-              <Link href="/signup" className="font-medium text-primary hover:underline">
-                Create an account
-              </Link>
+            {/* submit */}
+            <button type="submit" data-testid="button-submit" disabled={loading}
+              className="tsl-submit"
+              style={{ width: "100%", marginTop: 22, padding: 17, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10, background: C.submit, border: "none", borderRadius: 12, fontFamily: SANS, fontSize: 16, fontWeight: 800, color: "#FBFAF6", cursor: loading ? "wait" : "pointer", letterSpacing: "0.01em", opacity: loading ? 0.85 : 1 }}>
+              {loading && <Loader2 size={17} className="tsl-spin" />}
+              {loading ? "Signing in…" : "Sign in with password"}
+            </button>
+
+            <p style={{ margin: "22px 0 0", textAlign: "center", fontSize: 13.5, lineHeight: 1.6, color: C.grey, fontWeight: 500 }}>
+              Access restricted to <b style={{ color: "#374151" }}>@thinkingspree.com</b> accounts. New here?<br />
+              <Link href="/signup" style={{ fontWeight: 800, color: C.ink2, textDecoration: "underline", textUnderlineOffset: 2 }}>Create an account</Link>
             </p>
-          </div>
+          </form>
         </div>
-      </section>
+      </div>
+
+      <style>{`
+        .tsl-root input::placeholder { color: #A7A296; }
+        .tsl-field:focus-within { border-color: #9CA3AF; }
+        .tsl-google:hover:not(:disabled) { background: #F3F4F6; border-color: #9CA3AF; }
+        .tsl-submit:hover:not(:disabled) { background: #111117; }
+        .tsl-spin { animation: tslspin 1s linear infinite; }
+        @keyframes tslspin { to { transform: rotate(360deg); } }
+        @media (max-width: 900px) {
+          .tsl-left { display: none !important; }
+          .tsl-right { padding: 32px 20px !important; }
+          .tsl-mobilebrand { display: block !important; }
+        }
+      `}</style>
     </div>
   );
 }

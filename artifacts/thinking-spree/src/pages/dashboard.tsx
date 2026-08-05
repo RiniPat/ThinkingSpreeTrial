@@ -193,20 +193,44 @@ export default function DashboardPage() {
   const recentSprints = (stats?.sprintEvents ?? []).slice(0, 5);
   const sprintsLoading = statsLoading;
 
+  // Editorial rebrand — same warm-ivory / charcoal / Newsreader-serif language
+  // as the sign-in page. We re-skin the homepage by overriding the theme's CSS
+  // variables (and display fonts) on this wrapper; every existing Tailwind
+  // class below inherits the new palette automatically, so no markup logic
+  // changes. Other pages keep the original theme.
+  const homeTheme: any = {
+    "--background": "40 30% 96%",
+    "--card": "0 0% 100%",
+    "--card-foreground": "240 6% 16%",
+    "--card-border": "40 22% 89%",
+    "--border": "40 20% 88%",
+    "--foreground": "240 6% 16%",
+    "--muted": "40 24% 95%",
+    "--muted-foreground": "43 8% 40%",
+    "--primary": "240 6% 16%",
+    "--primary-foreground": "40 30% 97%",
+    "--input": "40 20% 86%",
+    "--ring": "240 6% 30%",
+    "--app-font-serif": "'Newsreader', Georgia, 'Times New Roman', serif",
+    "--app-font-sans": "'Archivo', ui-sans-serif, system-ui, sans-serif",
+    fontFamily: "'Archivo', ui-sans-serif, system-ui, sans-serif",
+  };
+
   return (
     <Layout>
       <ResearchCopilotDock />
+      <div className="ts-home" style={homeTheme}>
       <main className="flex-1 space-y-8 px-6 py-8 lg:px-10 max-w-[1400px] mx-auto">
         {/* Greeting */}
         <section className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <div className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+            <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-muted-foreground">
               {today}
             </div>
-            <h1 className="mt-2 font-serif text-4xl text-foreground">
-              {greeting}, <span className="italic text-primary">{firstName}</span>.
+            <h1 className="mt-2 font-serif text-5xl leading-[1.02] text-foreground">
+              {greeting}, <span className="italic">{firstName}</span>.
             </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="mt-2 text-sm text-muted-foreground">
               Here's what's on your plate today — only sprints aligned to you are shown below.
             </p>
           </div>
@@ -493,9 +517,20 @@ export default function DashboardPage() {
         </section>
 
         <footer className="pt-2 text-center text-xs text-muted-foreground">
-          Thinking Spree · Consultant Suite v4.4 · Internal use only
+          Thinking Spree · Consultant Suite · Internal use only
         </footer>
       </main>
+      <style>{`
+        .ts-home {
+          min-height: 100%;
+          background-color: #F5F2EC;
+          background-image: radial-gradient(rgba(38,38,43,0.045) 0.6px, transparent 0.6px);
+          background-size: 30px 30px;
+        }
+        .ts-home .rounded-xl { border-radius: 16px; }
+        .ts-home h1, .ts-home h2, .ts-home h3 { letter-spacing: -0.01em; }
+      `}</style>
+      </div>
     </Layout>
   );
 }
