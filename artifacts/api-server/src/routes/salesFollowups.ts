@@ -341,21 +341,61 @@ function buildListPayload(rows: (typeof salesFollowupsTable.$inferSelect)[], has
   return { items, stats, hasCompletedColumn };
 }
 
+// ─── Sheet-sync safety net ───────────────────────────────────────────────────
+// Reading the Google Sheet + upserting every client is slow (many sequential
+// Sheets + Neon round-trips). Doing it *synchronously* on every page load made
+// the request outrun Render's gateway timeout → HTTP 502. So: never block a
+// page load on it. The list GET serves cached DB rows immediately and refreshes
+// the sheet in the background; only a genuinely-cold first load waits, and even
+// then only for a bounded window.
+
+/** Reject a promise if it hasn't settled within `ms` (the original keeps running). */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+// Simple in-process throttle so rapid navigation doesn't fire overlapping syncs.
+let lastBgSyncAt = 0;
+let bgSyncInFlight = false;
+function maybeBackgroundSync(userId: number, log?: any) {
+  const now = Date.now();
+  if (bgSyncInFlight || now - lastBgSyncAt < 60_000) return;
+  bgSyncInFlight = true;
+  withTimeout(syncFromSheet(userId), 25_000, "background sheet sync")
+    .then(() => { lastBgSyncAt = Date.now(); })
+    .catch((err) => { log?.warn?.({ err }, "background sheet sync failed"); })
+    .finally(() => { bgSyncInFlight = false; });
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 router.get("/sales/followups", async (req, res) => {
   const auth = await requireSales(req, res); if (!auth) return; const userId = auth.userId;
   try {
-    let hasCompletedColumn = true;
-    try {
-      const s = await syncFromSheet(userId);
-      hasCompletedColumn = s.hasCompletedColumn;
-    } catch (err) {
-      // Sheet unreachable → still serve whatever we have cached, with a flag.
-      req.log?.warn?.({ err }, "followups sheet sync failed; serving cached rows");
+    let rows = await db.select().from(salesFollowupsTable);
+
+    if (rows.length === 0) {
+      // Cold start: nothing cached yet, so wait for the sheet — but only for a
+      // bounded window so we can never 502. If it overruns, serve what we have.
+      try {
+        const syncP = syncFromSheet(userId);
+        syncP.catch(() => {}); // swallow late rejection if it loses the race
+        await withTimeout(syncP, 15_000, "initial sheet sync");
+        rows = await db.select().from(salesFollowupsTable);
+        lastBgSyncAt = Date.now();
+      } catch (err) {
+        req.log?.warn?.({ err }, "initial followups sync slow/failed; serving cached rows");
+      }
+      res.json(buildListPayload(rows, true));
+    } else {
+      // Warm path: respond instantly with cached rows, refresh in the background.
+      res.json(buildListPayload(rows, true));
+      maybeBackgroundSync(userId, req.log);
     }
-    const rows = await db.select().from(salesFollowupsTable);
-    res.json(buildListPayload(rows, hasCompletedColumn));
   } catch (err) {
     req.log?.error?.({ err }, "GET followups failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load follow-ups" });
@@ -365,12 +405,28 @@ router.get("/sales/followups", async (req, res) => {
 router.post("/sales/followups/refresh", async (req, res) => {
   const auth = await requireSales(req, res); if (!auth) return; const userId = auth.userId;
   try {
-    const { synced, hasCompletedColumn } = await syncFromSheet(userId);
+    // User explicitly asked to sync — still bound it so a slow sheet returns a
+    // clean message instead of a gateway 502.
+    const syncP = syncFromSheet(userId);
+    syncP.catch(() => {});
+    const { synced, hasCompletedColumn } = await withTimeout(syncP, 25_000, "sheet refresh");
+    lastBgSyncAt = Date.now();
     const rows = await db.select().from(salesFollowupsTable);
     res.json({ ...buildListPayload(rows, hasCompletedColumn), synced, syncedAt: new Date().toISOString() });
   } catch (err) {
     req.log?.error?.({ err }, "refresh followups failed");
-    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to refresh from the sheet" });
+    // Fall back to cached rows so the tab still populates even if the sync stalls.
+    try {
+      const rows = await db.select().from(salesFollowupsTable);
+      res.status(200).json({
+        ...buildListPayload(rows, true),
+        synced: 0,
+        syncedAt: new Date().toISOString(),
+        warning: err instanceof Error ? err.message : "Sheet sync was slow; showing cached data.",
+      });
+    } catch {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to refresh from the sheet" });
+    }
   }
 });
 
