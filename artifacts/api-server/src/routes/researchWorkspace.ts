@@ -35,7 +35,7 @@ import {
   researchOutputsTable, isResearchTool, RESEARCH_TOOLS,
   salesLeadsTable, isSalesLeadStage,
   proposalsTable, type ProposalSection,
-  isRole, canAccessResearch, canAccessSales, canAccessInboxCrm, canManageRoles,
+  isRole, canAccessResearch, canAccessSales, canAccessInboxCrm, canManageRoles, canViewSalesOps,
 } from "@workspace/db";
 import { eq, desc, and } from "drizzle-orm";
 import {
@@ -505,6 +505,7 @@ router.get("/me/permissions", async (req, res) => {
     canAccessResearch: canAccessResearch(me.role),
     canAccessSales: canAccessSales(me.role),
     canAccessInboxCrm: canAccessInboxCrm(me.role),
+    canViewSalesOps: canViewSalesOps(me.role),
     canManageRoles: canManageRoles(me.role),
   });
 });

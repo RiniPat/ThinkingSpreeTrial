@@ -8,6 +8,7 @@ import {
   Bold, Italic, Underline, Highlighter, List, ListOrdered,
   AlertTriangle, CheckCircle2, Clock, ThumbsUp, ThumbsDown, MinusCircle,
   MessageSquare, Trophy, ChevronRight, ChevronLeft,
+  Users, Target, Undo2, BarChart3, Ban,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -35,12 +36,18 @@ type Followup = {
   draftSubject: string | null;
   draftBodyHtml: string | null;
   templateKey: string | null;
+  skipped: boolean;
+  skipReason: string | null;
 };
 type Stats = {
   due: number; completedSprints: number; sentThisMonth: number;
-  replyRate: number; awaitingReply: number; needsNudge: number;
+  replyRate: number; awaitingReply: number; needsNudge: number; skipped: number;
 };
-type ListPayload = { items: Followup[]; stats: Stats; hasCompletedColumn: boolean; syncedAt?: string };
+type Viewer = { name: string | null; role: string; canViewOps: boolean };
+type ListPayload = {
+  items: Followup[]; stats: Stats; hasCompletedColumn: boolean; syncedAt?: string;
+  cohorts?: string[]; scoped?: boolean; viewer?: Viewer;
+};
 type DbTemplate = { id: number; name: string; subject: string | null; body: string; sortOrder: number };
 
 // ─── Chip metadata ──────────────────────────────────────────────────────────
@@ -130,7 +137,7 @@ const TEMPLATES: Tmpl[] = [
   },
 ];
 
-type Profile = { name: string | null; title: string | null; phone: string | null; calendarLink: string | null };
+type Profile = { name: string | null; title: string | null; phone: string | null; calendarLink: string | null; sprintHostNames?: string | null };
 
 /** Auto-fill the tokens we actually know. Everything else stays a [placeholder]. */
 function resolveMerge(text: string, f: Followup, p?: Profile): string {
@@ -319,6 +326,7 @@ const FILTERS = [
   { key: "sent", label: "Sent" },
   { key: "interested", label: "Interested" },
   { key: "nudge", label: "Needs nudge" },
+  { key: "skipped", label: "Not targeting" },
 ] as const;
 type FilterKey = (typeof FILTERS)[number]["key"];
 
@@ -333,12 +341,24 @@ export default function SalesInboxPage() {
   const [page, setPage] = useState(1);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
-  const [tab, setTab] = useState<"followups" | "templates" | "clients" | "pipeline">("followups");
+  const [tab, setTab] = useState<"followups" | "templates" | "clients" | "pipeline" | "ops">("followups");
   const [logOpen, setLogOpen] = useState(false);
+  // Selected cohort (program) to narrow the list to, and check coverage against.
+  const [cohort, setCohort] = useState<string | null>(null);
+  // Oversight roles (sales/ops/admin) can flip between all rows and only their own.
+  const [scopeMode, setScopeMode] = useState<"all" | "mine">("all");
 
+  // Tab-visibility permissions (Ops tracking is ops/admin only).
+  const { data: perms } = useQuery<{ canViewSalesOps: boolean; role: string }>({
+    queryKey: ["/api/me/permissions"],
+    queryFn: () => customFetch(`${BASE}/api/me/permissions`, { credentials: "include" }),
+    staleTime: 60_000,
+  });
+
+  const scopeParam = scopeMode === "mine" ? "?scope=mine" : "";
   const { data, isLoading, isError, error } = useQuery<ListPayload>({
-    queryKey: ["/api/sales/followups"],
-    queryFn: () => customFetch(api("/sales/followups"), { credentials: "include" }),
+    queryKey: ["/api/sales/followups", scopeMode],
+    queryFn: () => customFetch(api(`/sales/followups${scopeParam}`), { credentials: "include" }),
     staleTime: 30_000,
   });
 
@@ -357,9 +377,9 @@ export default function SalesInboxPage() {
   const profile = profileQuery.data;
 
   const refresh = useMutation({
-    mutationFn: () => customFetch(api("/sales/followups/refresh"), { method: "POST", credentials: "include" }),
+    mutationFn: () => customFetch(api(`/sales/followups/refresh${scopeParam}`), { method: "POST", credentials: "include" }),
     onSuccess: (res: ListPayload) => {
-      qc.setQueryData(["/api/sales/followups"], res);
+      qc.setQueryData(["/api/sales/followups", scopeMode], res);
       setSyncedAt(res.syncedAt ?? new Date().toISOString());
       toast({ title: "Synced with Live Sprint Tracking", description: `${res.items.length} client(s) updated.` });
     },
@@ -378,15 +398,29 @@ export default function SalesInboxPage() {
   const items = data?.items ?? [];
   const stats = data?.stats;
 
+  // Cohorts the viewer can see (server-computed over the scoped rows; fall back
+  // to deriving from items). Drives the cohort dropdown + clickable badges.
+  const cohorts = useMemo(() => {
+    if (data?.cohorts?.length) return data.cohorts;
+    return [...new Set(items.map((f) => (f.program ?? "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  }, [data?.cohorts, items]);
+
+  // If the selected cohort disappears (e.g. after a scope switch), clear it.
+  useEffect(() => {
+    if (cohort && !cohorts.some((c) => c.toLowerCase() === cohort.toLowerCase())) setCohort(null);
+  }, [cohort, cohorts]);
+
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
     return items.filter((f) => {
-      if (term && !(`${f.startup} ${f.contact ?? ""} ${f.email ?? ""}`.toLowerCase().includes(term))) return false;
+      if (cohort && (f.program ?? "").trim().toLowerCase() !== cohort.toLowerCase()) return false;
+      if (term && !(`${f.startup} ${f.contact ?? ""} ${f.email ?? ""} ${f.program ?? ""}`.toLowerCase().includes(term))) return false;
       switch (filter) {
-        case "due": return f.status === "due";
+        case "due": return f.status === "due" && !f.skipped;
         case "sent": return f.status === "sent";
         case "interested": return f.status === "replied_interested";
         case "nudge": return f.status === "no_reply";
+        case "skipped": return f.skipped;
         default: return true;
       }
     }).sort((a, b) => {
@@ -395,7 +429,23 @@ export default function SalesInboxPage() {
       const tb = b.lastSprintDate ? new Date(b.lastSprintDate).getTime() : -Infinity;
       return tb - ta;
     });
-  }, [items, q, filter]);
+  }, [items, q, filter, cohort]);
+
+  // Coverage for the selected cohort — answers "have I reached out to every
+  // company on this list?". Computed over the viewer's (scoped) rows in the cohort.
+  const coverage = useMemo(() => {
+    if (!cohort) return null;
+    const inCohort = items.filter((f) => (f.program ?? "").trim().toLowerCase() === cohort.toLowerCase());
+    const reached = inCohort.filter(isSent).length;
+    const skipped = inCohort.filter((f) => f.skipped).length;
+    const pending = inCohort.filter((f) => f.status === "due" && !f.skipped).length;
+    const target = reached + pending; // companies we intend to contact
+    return {
+      total: inCohort.length, reached, skipped, pending, target,
+      pct: target ? Math.round((reached / target) * 100) : 100,
+      complete: pending === 0,
+    };
+  }, [items, cohort]);
 
   // Pagination ("indexation") — only ever render one page of rows so a large
   // client list (hundreds of rows) never bogs the page down.
@@ -405,8 +455,8 @@ export default function SalesInboxPage() {
     () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [filtered, safePage],
   );
-  // Any change to the filter or search resets to the first page.
-  useEffect(() => { setPage(1); }, [filter, q]);
+  // Any change to the filter, search, or cohort resets to the first page.
+  useEffect(() => { setPage(1); }, [filter, q, cohort]);
 
   const openRow = items.find((f) => f.key === openKey) ?? null;
 
@@ -449,6 +499,31 @@ export default function SalesInboxPage() {
           </div>
         </div>
 
+        {/* Scope indicator — consultants are limited to their own companies;
+            oversight roles can toggle Mine / All. */}
+        {data && (
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-[12px]">
+            {data.scoped ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-3 py-1 text-muted-foreground">
+                <Users size={12} /> Showing only companies you hosted or co-hosted
+              </span>
+            ) : perms?.canViewSalesOps || !data.scoped ? (
+              <div className="inline-flex overflow-hidden rounded-full border border-border">
+                {(["all", "mine"] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setScopeMode(m)}
+                    className="px-3 py-1 text-xs font-medium transition-colors"
+                    style={scopeMode === m ? { background: "hsl(222 47% 20%)", color: "white" } : { color: "var(--muted-foreground)" }}
+                  >
+                    {m === "all" ? "All consultants" : "Only mine"}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        )}
+
         {/* Missing-column banner */}
         {data && data.hasCompletedColumn === false && (
           <div className="mt-5 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -483,6 +558,7 @@ export default function SalesInboxPage() {
               { label: "Follow-ups", key: "followups" as const },
               { label: "Clients", key: "clients" as const },
               { label: "Templates", key: "templates" as const },
+              ...(perms?.canViewSalesOps ? [{ label: "Ops tracking", key: "ops" as const }] : []),
             ]).map((t) => {
               const active = t.key === tab;
               return (
@@ -505,6 +581,8 @@ export default function SalesInboxPage() {
             <ClientsPanel items={items} loading={isLoading} />
           ) : tab === "pipeline" ? (
             <PipelinePanel items={items} onOpen={(k) => setOpenKey(k)} />
+          ) : tab === "ops" ? (
+            <OpsPanel cohort={cohort} cohorts={cohorts} onCohort={setCohort} />
           ) : (
           <>
           {/* — Follow-ups view — */}
@@ -526,12 +604,24 @@ export default function SalesInboxPage() {
                 </button>
               );
             })}
+            {/* Cohort filter — pick a cohort to narrow the list and check coverage. */}
+            {cohorts.length > 0 && (
+              <select
+                value={cohort ?? ""}
+                onChange={(e) => setCohort(e.target.value || null)}
+                className="rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground outline-none focus:ring-2 focus:ring-ring/40"
+                title="Filter by cohort / program"
+              >
+                <option value="">All cohorts</option>
+                {cohorts.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            )}
             <div className="relative ml-auto">
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="Search client, contact, email…"
+                placeholder="Search client, contact, email, cohort…"
                 className="w-56 rounded-md border border-border bg-background py-1.5 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-ring/40"
               />
             </div>
@@ -545,6 +635,31 @@ export default function SalesInboxPage() {
               Scan replies
             </button>
           </div>
+
+          {/* Cohort coverage — "have I reached out to every company on this list?" */}
+          {cohort && coverage && (
+            <div className="border-b border-border px-5 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm">
+                  {coverage.complete
+                    ? <CheckCircle2 size={16} style={{ color: "var(--success)" }} />
+                    : <Target size={16} className="text-muted-foreground" />}
+                  <span className="font-medium">{cohort}</span>
+                  <span className="text-muted-foreground">
+                    {coverage.complete
+                      ? `All ${coverage.target} targeted compan${coverage.target === 1 ? "y" : "ies"} reached out to`
+                      : `${coverage.reached}/${coverage.target} reached out · ${coverage.pending} still to contact`}
+                    {coverage.skipped > 0 ? ` · ${coverage.skipped} not targeting` : ""}
+                  </span>
+                </div>
+                <button onClick={() => setCohort(null)} className="text-xs text-muted-foreground underline-offset-2 hover:underline">Clear cohort</button>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full transition-all"
+                  style={{ width: `${coverage.pct}%`, background: coverage.complete ? "var(--success)" : GOLD }} />
+              </div>
+            </div>
+          )}
 
           {/* Table */}
           {isLoading ? (
@@ -607,10 +722,20 @@ export default function SalesInboxPage() {
                         </td>
                         <td className="px-3 py-3">
                           <span className="whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: sm.bg, color: sm.fg }}>{sm.label}</span>
+                          {f.skipped && (
+                            <span className="ml-1.5 inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] font-medium" style={{ background: "#EEF1F5", color: "#4A5566" }}>
+                              <Ban size={11} /> Not targeting
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-3">
                           {f.program
-                            ? <span className="rounded px-2 py-0.5 text-[11px] font-medium" style={{ background: pm.bg, color: pm.fg }}>{f.program}</span>
+                            ? <button
+                                onClick={(e) => { e.stopPropagation(); setCohort(f.program); }}
+                                title={`Show only ${f.program} & check coverage`}
+                                className="rounded px-2 py-0.5 text-[11px] font-medium hover:ring-2 hover:ring-ring/40"
+                                style={{ background: pm.bg, color: pm.fg }}
+                              >{f.program}</button>
                             : <span className="text-muted-foreground">—</span>}
                         </td>
                         <td className="px-3 py-3">
@@ -691,6 +816,7 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
   const [subject, setSubject] = useState<string>(row.draftSubject ?? "");
   const [to, setTo] = useState<string>(row.email ?? "");
   const [confirmSend, setConfirmSend] = useState(false);
+  const [skipReason, setSkipReason] = useState("");
 
   // Fall back to the built-in copy if the DB library is momentarily empty.
   const picks: DbTemplate[] = templates.length
@@ -769,6 +895,21 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
       body: JSON.stringify({ mark: m }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Reply logged" }); },
+    onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  const skip = useMutation({
+    mutationFn: (reason: string | null) => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/skip`), {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Marked not targeting" }); onClose(); },
+    onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  const unskip = useMutation({
+    mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/unskip`), { method: "POST", credentials: "include" }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Back on the list" }); },
     onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
   });
 
@@ -864,6 +1005,21 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
         {/* Footer */}
         <div className="border-t border-border px-6 py-4">
+          {/* Not-targeting gate — the "willing to contact?" decision. */}
+          {row.skipped ? (
+            <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+              <span className="inline-flex items-center gap-1.5 text-muted-foreground"><Ban size={13} /> Not targeting{row.skipReason ? ` — ${row.skipReason}` : ""}</span>
+              <button onClick={() => unskip.mutate()} disabled={unskip.isPending} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 hover:bg-accent disabled:opacity-60"><Undo2 size={12} /> Put back on list</button>
+            </div>
+          ) : (
+            <div className="mb-3 flex items-center gap-2">
+              <span className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Not targeting?</span>
+              <input value={skipReason} onChange={(e) => setSkipReason(e.target.value)} placeholder="Optional reason (e.g. out of business)"
+                className="flex-1 rounded-md border border-border bg-card px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-ring/40" />
+              <button onClick={() => skip.mutate(skipReason.trim() || null)} disabled={skip.isPending}
+                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-60"><Ban size={12} /> Skip</button>
+            </div>
+          )}
           <div className="mb-3 flex items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Log reply</span>
             <button onClick={() => mark.mutate("interested")} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent" style={{ color: "#0F6E56" }}><ThumbsUp size={12} /> Interested</button>
@@ -1093,14 +1249,16 @@ function SignoffCard({ profile }: { profile?: Profile }) {
   const [title, setTitle] = useState(profile?.title ?? "");
   const [phone, setPhone] = useState(profile?.phone ?? "");
   const [calendarLink, setCalendarLink] = useState(profile?.calendarLink ?? "");
+  const [sprintHostNames, setSprintHostNames] = useState(profile?.sprintHostNames ?? "");
   useEffect(() => {
     setTitle(profile?.title ?? ""); setPhone(profile?.phone ?? ""); setCalendarLink(profile?.calendarLink ?? "");
-  }, [profile?.title, profile?.phone, profile?.calendarLink]);
+    setSprintHostNames(profile?.sprintHostNames ?? "");
+  }, [profile?.title, profile?.phone, profile?.calendarLink, profile?.sprintHostNames]);
 
   const save = useMutation({
     mutationFn: () => customFetch(api("/me/followup-profile"), {
       method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, phone, calendarLink }),
+      body: JSON.stringify({ title, phone, calendarLink, sprintHostNames }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/me/followup-profile"] }); toast({ title: "Sign-off saved" }); setOpen(false); },
     onError: (e: any) => toast({ title: "Couldn't save", description: String(e?.message ?? e), variant: "destructive" }),
@@ -1124,6 +1282,9 @@ function SignoffCard({ profile }: { profile?: Profile }) {
             <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+91 …" className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" /></label>
           <label className="text-sm"><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Calendar link</span>
             <input value={calendarLink} onChange={(e) => setCalendarLink(e.target.value)} placeholder="https://cal.com/…" className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" /></label>
+          <label className="text-sm sm:col-span-3"><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Sprint host name(s)</span>
+            <input value={sprintHostNames} onChange={(e) => setSprintHostNames(e.target.value)} placeholder="How your name appears in the sheet's Host / Co-Host column (comma-separated for aliases)" className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
+            <span className="mt-1 block text-[11px] text-muted-foreground">Used to show you only the companies you hosted or co-hosted. Leave blank to match your account name.</span></label>
           <div className="sm:col-span-3">
             <button onClick={() => save.mutate()} disabled={save.isPending} className="inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium text-white disabled:opacity-60" style={{ background: "hsl(222 47% 20%)" }}>
               {save.isPending ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save sign-off
@@ -1306,6 +1467,114 @@ function PipelinePanel({ items, onOpen }: { items: Followup[]; onOpen: (key: str
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Operations tracking (Ops tab · ops/admin only) ─────────────────────────
+// Per-consultant follow-up progress: has each consultant reached out to every
+// company they hosted or co-hosted (that they're willing to contact)?
+type OpsConsultant = {
+  host: string;
+  matchedUser: { id: number; name: string; email: string } | null;
+  cohorts: string[];
+  companies: number; reached: number; pending: number; due: number;
+  sent: number; replied: number; drafted: number; skipped: number; completionPct: number;
+};
+function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohorts: string[]; onCohort: (c: string | null) => void }) {
+  const cohortParam = cohort ? `?cohort=${encodeURIComponent(cohort)}` : "";
+  const { data, isLoading, isError, error } = useQuery<{ consultants: OpsConsultant[]; cohorts: string[] }>({
+    queryKey: ["/api/sales/followups/ops-progress", cohort],
+    queryFn: () => customFetch(api(`/sales/followups/ops-progress${cohortParam}`), { credentials: "include" }),
+    staleTime: 30_000,
+  });
+  const list = data?.consultants ?? [];
+  const opts = data?.cohorts?.length ? data.cohorts : cohorts;
+  const pendingConsultants = list.filter((c) => c.pending > 0).length;
+  const totalPending = list.reduce((n, c) => n + c.pending, 0);
+
+  return (
+    <div>
+      {/* Header + cohort filter */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3">
+        <div className="flex items-center gap-2 text-sm">
+          <BarChart3 size={16} className="text-muted-foreground" />
+          <span className="font-medium">Consultant follow-up progress</span>
+          <span className="text-muted-foreground">
+            · {list.length} consultant{list.length === 1 ? "" : "s"} · {pendingConsultants} with {totalPending} pending
+          </span>
+        </div>
+        {opts.length > 0 && (
+          <select
+            value={cohort ?? ""}
+            onChange={(e) => onCohort(e.target.value || null)}
+            className="rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground outline-none focus:ring-2 focus:ring-ring/40"
+          >
+            <option value="">All cohorts</option>
+            {opts.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 size={16} className="animate-spin" /> Loading progress…</div>
+      ) : isError ? (
+        <div className="px-5 py-12 text-center text-sm text-destructive">{String((error as any)?.message ?? "Failed to load.")}</div>
+      ) : list.length === 0 ? (
+        <div className="px-5 py-14 text-center text-sm text-muted-foreground">No consultants with companies{cohort ? ` in ${cohort}` : ""} yet.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                <th className="px-5 py-2.5 font-medium">Consultant</th>
+                <th className="px-3 py-2.5 font-medium">Companies</th>
+                <th className="px-3 py-2.5 font-medium">Reached out</th>
+                <th className="px-3 py-2.5 font-medium">Pending</th>
+                <th className="px-3 py-2.5 font-medium">Replied</th>
+                <th className="px-3 py-2.5 font-medium">Not targeting</th>
+                <th className="px-3 py-2.5 font-medium">Coverage</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((c) => {
+                const done = c.pending === 0;
+                return (
+                  <tr key={c.host} className="border-b border-border/60">
+                    <td className="px-5 py-3">
+                      <div className="font-medium">{c.matchedUser?.name ?? c.host}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {c.matchedUser?.email ?? (c.matchedUser ? "" : "unmatched — no user alias")}
+                        {c.cohorts.length ? ` · ${c.cohorts.join(", ")}` : ""}
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 tabular-nums">{c.companies}</td>
+                    <td className="px-3 py-3 tabular-nums">{c.reached}</td>
+                    <td className="px-3 py-3">
+                      {c.pending > 0
+                        ? <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "hsl(36 70% 92%)", color: "#8A5A00" }}>{c.pending} to send</span>
+                        : <span className="inline-flex items-center gap-1 text-[12px]" style={{ color: "var(--success)" }}><CheckCircle2 size={13} /> Done</span>}
+                    </td>
+                    <td className="px-3 py-3 tabular-nums">{c.replied}</td>
+                    <td className="px-3 py-3 tabular-nums text-muted-foreground">{c.skipped}</td>
+                    <td className="px-3 py-3">
+                      <div className="flex items-center gap-2">
+                        <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
+                          <div className="h-full rounded-full" style={{ width: `${c.completionPct}%`, background: done ? "var(--success)" : GOLD }} />
+                        </div>
+                        <span className="tabular-nums text-xs text-muted-foreground">{c.completionPct}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="border-t border-border px-5 py-3 text-[11px] text-muted-foreground">
+        Coverage = reached out ÷ (reached out + still-to-contact). Companies marked “Not targeting” are excluded.
       </div>
     </div>
   );

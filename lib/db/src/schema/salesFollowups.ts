@@ -48,6 +48,13 @@ export const salesFollowupsTable = pgTable("sales_followups", {
   replyDetectedAt: timestamp("reply_detected_at", { withTimezone: true }),
   replyIsManual: boolean("reply_is_manual").notNull().default(false),
 
+  // "Willing to contact?" gate (migration 023). When true the consultant has
+  // decided NOT to reach out; Operations tracking excludes it from the
+  // "should have sent" count. Independent of `status`.
+  skipped: boolean("skipped").notNull().default(false),
+  skipReason: text("skip_reason"),
+  skippedAt: timestamp("skipped_at", { withTimezone: true }),
+
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

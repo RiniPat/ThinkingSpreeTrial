@@ -18,7 +18,10 @@
  * "column not found" flag (the UI shows a banner); nothing is marked Due.
  */
 import { Router } from "express";
-import { db, salesFollowupsTable, emailTemplatesTable, usersTable, makeClientKey } from "@workspace/db";
+import {
+  db, salesFollowupsTable, emailTemplatesTable, usersTable, makeClientKey,
+  canViewSalesOps, isConsultantScoped,
+} from "@workspace/db";
 import { eq, inArray, and, asc } from "drizzle-orm";
 import { google } from "googleapis";
 import sanitizeHtmlLib from "sanitize-html";
@@ -36,15 +39,35 @@ const DUE_AFTER_DAYS = 30;
 const NUDGE_AFTER_DAYS = 7;
 const DAY_MS = 86_400_000;
 
-// Sales tab is visible to consultant | sales | admin. Enforce server-side too
-// (the sidebar gate is UX only). One cheap role read per request.
-const SALES_ROLES = new Set(["consultant", "sales", "admin"]);
-async function requireSales(req: any, res: any): Promise<{ userId: number; role: string } | null> {
+// Sales tab is visible to consultant | sales | ops | admin. Enforce server-side
+// too (the sidebar gate is UX only). One cheap identity read per request — we
+// also pull `name` + `sprintHostNames` so consultant-scoping can match the
+// caller against the sheet's free-text Host / Co-Host columns.
+const SALES_ROLES = new Set(["consultant", "sales", "ops", "admin"]);
+type SalesAuth = { userId: number; role: string; name: string; sprintHostNames: string | null };
+async function requireSales(req: any, res: any): Promise<SalesAuth | null> {
   const userId = req.session?.userId;
   if (!userId) { res.status(401).json({ error: "Not authenticated" }); return null; }
-  const [u] = await db.select({ role: usersTable.role }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  const [u] = await db
+    .select({ role: usersTable.role, name: usersTable.name, sprintHostNames: usersTable.sprintHostNames })
+    .from(usersTable).where(eq(usersTable.id, userId)).limit(1);
   if (!u || !SALES_ROLES.has(u.role)) { res.status(403).json({ error: "Not authorized for Sales" }); return null; }
-  return { userId, role: u.role };
+  return { userId, role: u.role, name: u.name, sprintHostNames: u.sprintHostNames ?? null };
+}
+
+/**
+ * The set of normalised name aliases that identify a consultant in the sheet's
+ * free-text Host / Co-Host columns: their account name plus any explicit
+ * `sprint_host_names` aliases (comma / newline / semicolon separated).
+ */
+function aliasesForUser(u: { name: string; sprintHostNames: string | null }): Set<string> {
+  const parts = [u.name, ...String(u.sprintHostNames ?? "").split(/[,;\n]/)];
+  return new Set(parts.map(norm).filter(Boolean));
+}
+
+/** True when a row's host or co-host matches one of the caller's aliases. */
+function rowMatchesAliases(row: { host: string | null; cohost: string | null }, aliases: Set<string>): boolean {
+  return aliases.has(norm(row.host)) || aliases.has(norm(row.cohost));
 }
 
 // ─── Consultant follow-up profile (sign-off merge fields) ───────────────────
@@ -60,6 +83,7 @@ router.get("/me/followup-profile", async (req, res) => {
       title: (u as any)?.title ?? null,
       phone: (u as any)?.phone ?? null,
       calendarLink: (u as any)?.calendarLink ?? null,
+      sprintHostNames: (u as any)?.sprintHostNames ?? null,
     });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load profile" });
@@ -72,6 +96,7 @@ router.put("/me/followup-profile", async (req, res) => {
   if (req.body?.title != null) patch.title = String(req.body.title).trim() || null;
   if (req.body?.phone != null) patch.phone = String(req.body.phone).trim() || null;
   if (req.body?.calendarLink != null) patch.calendarLink = String(req.body.calendarLink).trim() || null;
+  if (req.body?.sprintHostNames != null) patch.sprintHostNames = String(req.body.sprintHostNames).trim() || null;
   try {
     await db.update(usersTable).set(patch).where(eq(usersTable.id, auth.userId));
     res.json({ ok: true });
@@ -315,6 +340,8 @@ function buildListPayload(rows: (typeof salesFollowupsTable.$inferSelect)[], has
       draftSubject: r.draftSubject,
       draftBodyHtml: r.draftBodyHtml,
       templateKey: r.templateKey,
+      skipped: r.skipped,
+      skipReason: r.skipReason,
     }))
     // Only show clients who've actually done a sprint (have a sprint date).
     .filter((r) => r.lastSprintDate);
@@ -330,15 +357,44 @@ function buildListPayload(rows: (typeof salesFollowupsTable.$inferSelect)[], has
   const replied = now.filter((r) => ["replied", "replied_interested", "replied_not_now"].includes(r.status)).length;
 
   const stats = {
-    due: now.filter((r) => r.status === "due").length,
+    due: now.filter((r) => r.status === "due" && !r.skipped).length,
     completedSprints: now.filter((r) => r.sprintCompleted === true).length,
     sentThisMonth,
     replyRate: sentTotal ? Math.round((replied / sentTotal) * 100) : 0,
     awaitingReply: now.filter((r) => r.status === "sent").length,
     needsNudge: now.filter((r) => r.status === "no_reply").length,
+    skipped: now.filter((r) => r.skipped).length,
   };
 
-  return { items, stats, hasCompletedColumn };
+  // Distinct cohorts (programs) present in the visible set, for the filter UI.
+  const cohorts = [...new Set(now.map((r) => (r.program ?? "").trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+
+  return { items, stats, hasCompletedColumn, cohorts };
+}
+
+// ─── Read-time scoping ──────────────────────────────────────────────────────
+// The sheet sync rewrites the WHOLE shared table, so we scope at read time.
+//   • consultant  → only rows they hosted or co-hosted (alias match).
+//   • sales/ops/admin → all rows, with an optional ?scope=mine self-filter.
+// An optional ?cohort=<program> narrows to one cohort.
+function viewerInfo(auth: SalesAuth) {
+  return { name: auth.name, role: auth.role, canViewOps: canViewSalesOps(auth.role) };
+}
+
+type ScopeResult = { rows: (typeof salesFollowupsTable.$inferSelect)[]; scoped: boolean };
+function scopeRows(rows: (typeof salesFollowupsTable.$inferSelect)[], auth: SalesAuth, query: any): ScopeResult {
+  const wantMine = String(query?.scope ?? "") === "mine";
+  const forceScope = isConsultantScoped(auth.role);
+  const scoped = forceScope || (wantMine && !forceScope);
+  let out = rows;
+  if (scoped) {
+    const aliases = aliasesForUser(auth);
+    out = out.filter((r) => rowMatchesAliases(r, aliases));
+  }
+  const cohort = String(query?.cohort ?? "").trim().toLowerCase();
+  if (cohort) out = out.filter((r) => (r.program ?? "").trim().toLowerCase() === cohort);
+  return { rows: out, scoped };
 }
 
 // ─── Sheet-sync safety net ───────────────────────────────────────────────────
@@ -390,12 +446,15 @@ router.get("/sales/followups", async (req, res) => {
       } catch (err) {
         req.log?.warn?.({ err }, "initial followups sync slow/failed; serving cached rows");
       }
-      res.json(buildListPayload(rows, true));
     } else {
-      // Warm path: respond instantly with cached rows, refresh in the background.
-      res.json(buildListPayload(rows, true));
+      // Warm path: refresh the sheet in the background (response sent below).
       maybeBackgroundSync(userId, req.log);
     }
+
+    // Scope to the caller (consultant → own hosted/co-hosted; oversight → all,
+    // with an optional ?scope=mine), then apply any ?cohort= filter.
+    const { rows: visible, scoped } = scopeRows(rows, auth, req.query);
+    res.json({ ...buildListPayload(visible, true), scoped, viewer: viewerInfo(auth) });
   } catch (err) {
     req.log?.error?.({ err }, "GET followups failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load follow-ups" });
@@ -411,15 +470,21 @@ router.post("/sales/followups/refresh", async (req, res) => {
     syncP.catch(() => {});
     const { synced, hasCompletedColumn } = await withTimeout(syncP, 25_000, "sheet refresh");
     lastBgSyncAt = Date.now();
-    const rows = await db.select().from(salesFollowupsTable);
-    res.json({ ...buildListPayload(rows, hasCompletedColumn), synced, syncedAt: new Date().toISOString() });
+    const all = await db.select().from(salesFollowupsTable);
+    const { rows, scoped } = scopeRows(all, auth, req.query);
+    res.json({
+      ...buildListPayload(rows, hasCompletedColumn), scoped, viewer: viewerInfo(auth),
+      synced, syncedAt: new Date().toISOString(),
+    });
   } catch (err) {
     req.log?.error?.({ err }, "refresh followups failed");
     // Fall back to cached rows so the tab still populates even if the sync stalls.
     try {
-      const rows = await db.select().from(salesFollowupsTable);
+      const all = await db.select().from(salesFollowupsTable);
+      const { rows, scoped } = scopeRows(all, auth, req.query);
       res.status(200).json({
         ...buildListPayload(rows, true),
+        scoped, viewer: viewerInfo(auth),
         synced: 0,
         syncedAt: new Date().toISOString(),
         warning: err instanceof Error ? err.message : "Sheet sync was slow; showing cached data.",
@@ -427,6 +492,88 @@ router.post("/sales/followups/refresh", async (req, res) => {
     } catch {
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to refresh from the sheet" });
     }
+  }
+});
+
+// ─── Operations tracking: per-consultant follow-up progress ─────────────────
+// Ops/admin only. Groups the WHOLE table by consultant (each company counts
+// under BOTH its host and its co-host), so Ops can see whether every consultant
+// has reached out to their companies. Optional ?cohort=<program> narrows it.
+const SENT_STATUSES = new Set(["sent", "no_reply", "replied", "replied_interested", "replied_not_now"]);
+
+router.get("/sales/followups/ops-progress", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  if (!canViewSalesOps(auth.role)) { res.status(403).json({ error: "Operations tracking is available to Ops and Admin only." }); return; }
+  try {
+    const cohort = String(req.query?.cohort ?? "").trim().toLowerCase();
+    const all = (await db.select().from(salesFollowupsTable))
+      .filter((r) => r.lastSprintDate)
+      .filter((r) => !cohort || (r.program ?? "").trim().toLowerCase() === cohort);
+
+    // Reconcile each consultant name to a known user (by alias) for display.
+    const users = await db
+      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, sprintHostNames: usersTable.sprintHostNames })
+      .from(usersTable);
+    const userByAlias = new Map<string, { id: number; name: string; email: string }>();
+    for (const u of users) {
+      for (const a of aliasesForUser(u)) if (!userByAlias.has(a)) userByAlias.set(a, { id: u.id, name: u.name, email: u.email });
+    }
+
+    type Grp = {
+      host: string; matchedUser: { id: number; name: string; email: string } | null;
+      cohorts: Set<string>; companies: number; reached: number; pending: number;
+      due: number; sent: number; replied: number; drafted: number; skipped: number;
+    };
+    const groups = new Map<string, Grp>();
+    const bump = (name: string | null, r: typeof salesFollowupsTable.$inferSelect) => {
+      const clean = (name ?? "").trim();
+      if (!clean) return;
+      const k = norm(clean);
+      let g = groups.get(k);
+      if (!g) {
+        g = {
+          host: clean, matchedUser: userByAlias.get(k) ?? null, cohorts: new Set(),
+          companies: 0, reached: 0, pending: 0, due: 0, sent: 0, replied: 0, drafted: 0, skipped: 0,
+        };
+        groups.set(k, g);
+      }
+      const st = effectiveStatus(r);
+      const reached = SENT_STATUSES.has(st);
+      g.companies += 1;
+      if (r.program) g.cohorts.add(r.program.trim());
+      if (r.skipped) g.skipped += 1;
+      if (reached) { g.reached += 1; g.sent += 1; }
+      if (["replied", "replied_interested", "replied_not_now"].includes(st)) g.replied += 1;
+      if (st === "draft") g.drafted += 1;
+      if (st === "due" && !r.skipped) { g.due += 1; g.pending += 1; }
+    };
+    for (const r of all) { bump(r.host, r); bump(r.cohost, r); }
+
+    const consultants = [...groups.values()]
+      .map((g) => {
+        const denom = g.reached + g.pending;
+        return {
+          host: g.host,
+          matchedUser: g.matchedUser,
+          cohorts: [...g.cohorts].sort((a, b) => a.localeCompare(b)),
+          companies: g.companies,
+          reached: g.reached,
+          pending: g.pending,
+          due: g.due,
+          sent: g.sent,
+          replied: g.replied,
+          drafted: g.drafted,
+          skipped: g.skipped,
+          completionPct: denom ? Math.round((g.reached / denom) * 100) : 100,
+        };
+      })
+      .sort((a, b) => b.pending - a.pending || a.completionPct - b.completionPct || a.host.localeCompare(b.host));
+
+    const cohorts = [...new Set(all.map((r) => (r.program ?? "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    res.json({ consultants, cohorts });
+  } catch (err) {
+    req.log?.error?.({ err }, "ops-progress failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load Operations progress" });
   }
 });
 
@@ -445,6 +592,52 @@ router.post("/sales/followups/:key/mark", async (req, res) => {
     await db.update(salesFollowupsTable)
       .set({ ...map[mark], replyIsManual: true, replyDetectedAt: new Date(), updatedAt: new Date() })
       .where(eq(salesFollowupsTable.clientKey, key));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to update" });
+  }
+});
+
+// ─── "Not targeting" gate (the PRD willing-to decision) ─────────────────────
+// A consultant decides they won't reach out to a company; Ops tracking then
+// excludes it from the "should have sent" count. Allowed for the hosting
+// consultant (alias match) or any ops/admin.
+async function loadRowForKey(key: string) {
+  const [row] = await db.select().from(salesFollowupsTable).where(eq(salesFollowupsTable.clientKey, key)).limit(1);
+  return row ?? null;
+}
+function canActOnRow(row: { host: string | null; cohost: string | null }, auth: SalesAuth): boolean {
+  if (canViewSalesOps(auth.role)) return true;
+  return rowMatchesAliases(row, aliasesForUser(auth));
+}
+
+router.post("/sales/followups/:key/skip", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  const reason = String(req.body?.reason ?? "").trim() || null;
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found. Refresh the sheet and try again." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only change companies you hosted or co-hosted." }); return; }
+    await db.update(salesFollowupsTable)
+      .set({ skipped: true, skipReason: reason, skippedAt: new Date(), updatedAt: new Date() })
+      .where(eq(salesFollowupsTable.id, row.id));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to update" });
+  }
+});
+
+router.post("/sales/followups/:key/unskip", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only change companies you hosted or co-hosted." }); return; }
+    await db.update(salesFollowupsTable)
+      .set({ skipped: false, skipReason: null, skippedAt: null, updatedAt: new Date() })
+      .where(eq(salesFollowupsTable.id, row.id));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to update" });
