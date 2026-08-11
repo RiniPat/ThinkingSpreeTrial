@@ -16,6 +16,11 @@ export const usersTable = pgTable("users", {
   title: text("title"),
   phone: text("phone"),
   calendarLink: text("calendar_link"),
+  // Alias(es) matching this user's name in the sheet's Sprint Host / Co-Host
+  // columns (comma/newline separated). Scopes a consultant to their own
+  // hosted/co-hosted companies in Sales follow-ups (migration 023). Falls back
+  // to matching `name` when empty.
+  sprintHostNames: text("sprint_host_names"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

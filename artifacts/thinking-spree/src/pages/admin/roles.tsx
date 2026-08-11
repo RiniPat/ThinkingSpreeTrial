@@ -72,6 +72,7 @@ export default function AdminRolesPage() {
                         <option value="consultant">Consultant</option>
                         <option value="sales">Sales</option>
                         <option value="research">Research</option>
+                        <option value="ops">Ops</option>
                         <option value="admin">Admin</option>
                       </select>
                     </td>
@@ -85,7 +86,7 @@ export default function AdminRolesPage() {
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-xs text-blue-900 flex items-start gap-2">
           <Shield className="h-4 w-4 flex-shrink-0 mt-0.5" />
           <div>
-            <strong>Role definitions:</strong> Consultant sees everything (Companies, Summary, Sprint Tracking, Research, Sales). Sales sees only Sales tools. Research sees only Research tools. Admin sees everything + can manage roles.
+            <strong>Role definitions:</strong> Consultant sees everything (Companies, Summary, Sprint Tracking, Research, Sales) but in Sales follow-ups is scoped to companies they hosted or co-hosted. Sales sees only Sales tools (all cohorts). Research sees only Research tools. Ops sees the Sales tab across all cohorts/consultants plus the Operations tracking view (per-consultant follow-up progress); not a full admin. Admin sees everything + can manage roles.
           </div>
         </div>
 
