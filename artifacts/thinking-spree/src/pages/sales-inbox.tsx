@@ -9,6 +9,7 @@ import {
   AlertTriangle, CheckCircle2, Clock, ThumbsUp, ThumbsDown, MinusCircle,
   MessageSquare, Trophy, ChevronRight, ChevronLeft,
   Users, Target, Undo2, BarChart3, Ban,
+  FileText, Link2, Sparkles, Paperclip, Trash2, Wand2, Download, FileType2,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -30,6 +31,8 @@ type Followup = {
   lastSprintDate: string | null;
   daysSinceSprint: number | null;
   status: string;
+  interest: string | null;
+  interestSetAt: string | null;
   replyState: string | null;
   sentAt: string | null;
   lastContactAt: string | null;
@@ -38,11 +41,29 @@ type Followup = {
   templateKey: string | null;
   skipped: boolean;
   skipReason: string | null;
+  hasSent: boolean;
+  awaitingReply: boolean;
+  nudgeDue: boolean;
+  enrichmentStatus: string | null;
+  tSheetUrl: string | null;
+  hasTSheetSummary: boolean;
+  hasDocsSummary: boolean;
+  hasGrowthDoc: boolean;
+  docCount: number;
 };
 type Stats = {
   due: number; completedSprints: number; sentThisMonth: number;
   replyRate: number; awaitingReply: number; needsNudge: number; skipped: number;
+  interested: number; maybe: number; notNow: number; untriaged: number; actionable: number;
 };
+
+// ─── Triage (interest) metadata ──────────────────────────────────────────────
+const INTEREST_META: Record<string, { label: string; bg: string; fg: string }> = {
+  interested: { label: "Interested",   bg: "#E1F5EE", fg: "#0F6E56" },
+  maybe:      { label: "Maybe",         bg: "hsl(36 70% 92%)", fg: "#8A5A00" },
+  not_now:    { label: "Not now",       bg: "#EEF1F5", fg: "#4A5566" },
+};
+const ACTIONABLE_INTEREST = new Set(["interested", "maybe"]);
 type Viewer = { name: string | null; role: string; canViewOps: boolean };
 type ListPayload = {
   items: Followup[]; stats: Stats; hasCompletedColumn: boolean; syncedAt?: string;
@@ -209,6 +230,44 @@ function StatCard({ label, value, hint, accent }: { label: string; value: string
   );
 }
 
+// ─── Triage control (interested / maybe / not now) ──────────────────────────
+function TriageCell({ f, compact }: { f: Followup; compact?: boolean }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const set = useMutation({
+    mutationFn: (interest: string | null) => customFetch(api(`/sales/followups/${encodeURIComponent(f.key)}/interest`), {
+      method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interest }),
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }),
+    onError: (e: any) => toast({ title: "Couldn't update triage", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+  const opts: { key: string; label: string; icon: React.ReactNode; fg: string; bg: string }[] = [
+    { key: "interested", label: "Interested", icon: <ThumbsUp size={12} />, fg: "#0F6E56", bg: "#E1F5EE" },
+    { key: "maybe", label: "Maybe", icon: <MinusCircle size={12} />, fg: "#8A5A00", bg: "hsl(36 70% 92%)" },
+    { key: "not_now", label: "Not now", icon: <ThumbsDown size={12} />, fg: "#4A5566", bg: "#EEF1F5" },
+  ];
+  return (
+    <div className={`inline-flex overflow-hidden rounded-md border border-border ${compact ? "" : ""}`} onClick={(e) => e.stopPropagation()}>
+      {opts.map((o) => {
+        const active = f.interest === o.key;
+        return (
+          <button
+            key={o.key}
+            title={o.label}
+            disabled={set.isPending}
+            onClick={() => set.mutate(active ? null : o.key)}
+            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50"
+            style={active ? { background: o.bg, color: o.fg } : { color: "var(--muted-foreground)" }}
+          >
+            {o.icon}{!compact && <span>{o.label}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Reply / send helpers (drive insights + the clients "reverted" count) ────
 const SENT_STATUSES = new Set(["sent", "no_reply", "replied", "replied_interested", "replied_not_now"]);
 const REPLIED_STATUSES = new Set(["replied", "replied_interested", "replied_not_now"]);
@@ -322,11 +381,12 @@ function TemplatePerformance({ items, templates }: { items: Followup[]; template
 
 const FILTERS = [
   { key: "all", label: "All" },
-  { key: "due", label: "Due" },
-  { key: "sent", label: "Sent" },
+  { key: "untriaged", label: "To triage" },
   { key: "interested", label: "Interested" },
+  { key: "maybe", label: "Maybe" },
+  { key: "not_now", label: "Not now" },
+  { key: "sent", label: "Sent" },
   { key: "nudge", label: "Needs nudge" },
-  { key: "skipped", label: "Not targeting" },
 ] as const;
 type FilterKey = (typeof FILTERS)[number]["key"];
 
@@ -416,11 +476,12 @@ export default function SalesInboxPage() {
       if (cohort && (f.program ?? "").trim().toLowerCase() !== cohort.toLowerCase()) return false;
       if (term && !(`${f.startup} ${f.contact ?? ""} ${f.email ?? ""} ${f.program ?? ""}`.toLowerCase().includes(term))) return false;
       switch (filter) {
-        case "due": return f.status === "due" && !f.skipped;
-        case "sent": return f.status === "sent";
-        case "interested": return f.status === "replied_interested";
-        case "nudge": return f.status === "no_reply";
-        case "skipped": return f.skipped;
+        case "untriaged": return !f.interest;
+        case "interested": return f.interest === "interested";
+        case "maybe": return f.interest === "maybe";
+        case "not_now": return f.interest === "not_now";
+        case "sent": return f.hasSent;
+        case "nudge": return f.nudgeDue;
         default: return true;
       }
     }).sort((a, b) => {
@@ -436,14 +497,16 @@ export default function SalesInboxPage() {
   const coverage = useMemo(() => {
     if (!cohort) return null;
     const inCohort = items.filter((f) => (f.program ?? "").trim().toLowerCase() === cohort.toLowerCase());
-    const reached = inCohort.filter(isSent).length;
-    const skipped = inCohort.filter((f) => f.skipped).length;
-    const pending = inCohort.filter((f) => f.status === "due" && !f.skipped).length;
-    const target = reached + pending; // companies we intend to contact
+    const actionable = inCohort.filter((f) => ACTIONABLE_INTEREST.has(f.interest ?? ""));
+    const reached = actionable.filter((f) => f.hasSent).length;
+    const untriaged = inCohort.filter((f) => !f.interest).length;
+    const notNow = inCohort.filter((f) => f.interest === "not_now").length;
+    const target = actionable.length; // interested/maybe = the ones we intend to contact
+    const pending = target - reached;
     return {
-      total: inCohort.length, reached, skipped, pending, target,
+      total: inCohort.length, reached, skipped: notNow, untriaged, pending, target,
       pct: target ? Math.round((reached / target) * 100) : 100,
-      complete: pending === 0,
+      complete: pending === 0 && untriaged === 0,
     };
   }, [items, cohort]);
 
@@ -539,11 +602,11 @@ export default function SalesInboxPage() {
             two-column band so the top of the page reads evenly, not cluttered. */}
         <div className="mt-6 grid gap-4 lg:grid-cols-[1.15fr_1fr]">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <StatCard label="Due for follow-up" value={stats?.due ?? "—"} accent />
+            <StatCard label="To triage" value={stats?.untriaged ?? "—"} accent hint="not yet marked" />
+            <StatCard label="Interested / Maybe" value={stats ? stats.interested + stats.maybe : "—"} hint="to follow up" />
             <StatCard label="Awaiting reply" value={stats?.awaitingReply ?? "—"} />
-            <StatCard label="Needs nudge" value={stats?.needsNudge ?? "—"} />
+            <StatCard label="Needs nudge" value={stats?.needsNudge ?? "—"} hint="7+ days, no reply" />
             <StatCard label="Sent this month" value={stats?.sentThisMonth ?? "—"} />
-            <StatCard label="Completed sprints" value={stats?.completedSprints ?? "—"} hint="from sheet" />
             <StatCard label="Reply rate" value={stats ? `${stats.replyRate}%` : "—"} />
           </div>
           <TemplatePerformance items={items} templates={templates} />
@@ -681,6 +744,7 @@ export default function SalesInboxPage() {
                 <thead>
                   <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
                     <th className="px-5 py-2.5 font-medium">Client</th>
+                    <th className="px-3 py-2.5 font-medium">Triage</th>
                     <th className="px-3 py-2.5 font-medium">Status</th>
                     <th className="px-3 py-2.5 font-medium">Program</th>
                     <th className="px-3 py-2.5 font-medium">Stage</th>
@@ -721,10 +785,13 @@ export default function SalesInboxPage() {
                           </div>
                         </td>
                         <td className="px-3 py-3">
+                          <TriageCell f={f} compact />
+                        </td>
+                        <td className="px-3 py-3">
                           <span className="whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: sm.bg, color: sm.fg }}>{sm.label}</span>
-                          {f.skipped && (
-                            <span className="ml-1.5 inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] font-medium" style={{ background: "#EEF1F5", color: "#4A5566" }}>
-                              <Ban size={11} /> Not targeting
+                          {f.nudgeDue && (
+                            <span className="ml-1.5 inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] font-medium" style={{ background: "#FBEEE1", color: "#A85A1F" }}>
+                              <Clock size={11} /> Nudge due
                             </span>
                           )}
                         </td>
@@ -806,28 +873,76 @@ export default function SalesInboxPage() {
 }
 
 // ─── Compose drawer ─────────────────────────────────────────────────────────
+// Enrichment context returned by GET /:key/context.
+type CtxDoc = { id: number; title: string | null; sourceType: string; url: string | null; status: string | null; error: string | null };
+type GrowthState = { brief: any; docxUrl: string | null; pdfUrl: string | null; needsValidation?: string[] } | null;
+type ContextPayload = {
+  interest: string | null;
+  tSheetUrl: string | null; tSheetSummary: string | null; docsSummary: string | null;
+  enrichmentStatus: string | null; enrichmentError: string | null; enrichedAt: string | null;
+  docs: CtxDoc[];
+  growth: { brief: any; docxUrl: string | null; pdfUrl: string | null; generatedAt: string | null } | null;
+};
+
 function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; templates: DbTemplate[]; profile?: Profile; onClose: () => void }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const { data: me } = useGetMe();
   const prof: Profile = profile ?? { name: (me as any)?.name ?? null, title: null, phone: null, calendarLink: null };
   const editorRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [tmplId, setTmplId] = useState<number | null>(null);
   const [subject, setSubject] = useState<string>(row.draftSubject ?? "");
   const [to, setTo] = useState<string>(row.email ?? "");
   const [confirmSend, setConfirmSend] = useState(false);
-  const [skipReason, setSkipReason] = useState("");
 
-  // Fall back to the built-in copy if the DB library is momentarily empty.
+  // Triage (local mirror for instant gating; server is source of truth).
+  const [interest, setInterest] = useState<string | null>(row.interest ?? null);
+  const actionable = ACTIONABLE_INTEREST.has(interest ?? "");
+
+  // Enrichment state.
+  const [tSheetUrl, setTSheetUrl] = useState<string>(row.tSheetUrl ?? "");
+  const [existingDocs, setExistingDocs] = useState<(CtxDoc & { keep: boolean })[]>([]);
+  const [pendingLinks, setPendingLinks] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [linkInput, setLinkInput] = useState("");
+  const [enrichStatus, setEnrichStatus] = useState<string | null>(row.enrichmentStatus ?? null);
+  const [enrichError, setEnrichError] = useState<string | null>(null);
+
+  // Growth Prospects state.
+  const [growth, setGrowth] = useState<GrowthState>(null);
+  const [attachGrowth, setAttachGrowth] = useState(false);
+  const [briefEditor, setBriefEditor] = useState<string>("");
+  const [showBriefJson, setShowBriefJson] = useState(false);
+
+  // Hydrate from the server context once (T-sheet URL, docs, prior summaries, growth doc).
+  const ctxQuery = useQuery<ContextPayload>({
+    queryKey: ["/api/sales/followups", row.key, "context"],
+    queryFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/context`), { credentials: "include" }),
+    staleTime: 10_000,
+  });
+  useEffect(() => {
+    const c = ctxQuery.data;
+    if (!c) return;
+    setInterest(c.interest ?? null);
+    if (c.tSheetUrl != null) setTSheetUrl(c.tSheetUrl);
+    setExistingDocs((c.docs ?? []).map((d) => ({ ...d, keep: true })));
+    setEnrichStatus(c.enrichmentStatus ?? null);
+    setEnrichError(c.enrichmentError ?? null);
+    if (c.growth) {
+      setGrowth({ brief: c.growth.brief, docxUrl: c.growth.docxUrl, pdfUrl: c.growth.pdfUrl, needsValidation: c.growth.brief?.needsValidation });
+      setBriefEditor(JSON.stringify(c.growth.brief, null, 2));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctxQuery.data]);
+
   const picks: DbTemplate[] = templates.length
     ? templates
     : TEMPLATES.map((t, i) => ({ id: -(i + 1), name: t.name, subject: t.subject, body: t.body, sortOrder: i }));
 
-  // Seed the editor once (uncontrolled contentEditable). A saved draft is shown
-  // as-is; otherwise start with a highlighted placeholder hint.
   useEffect(() => {
     if (editorRef.current) {
-      editorRef.current.innerHTML = row.draftBodyHtml ?? "<p>Pick a template above to get started.</p>";
+      editorRef.current.innerHTML = row.draftBodyHtml ?? "<p>Analyse the T-sheet, pick a template, then Generate an AI draft — or paste your own.</p>";
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -836,39 +951,89 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
     setTmplId(t.id);
     setConfirmSend(false);
     setSubject(resolveMerge(t.subject ?? "", row, prof));
-    if (editorRef.current) {
-      editorRef.current.innerHTML = highlightPlaceholders(resolveMerge(t.body, row, prof));
-    }
+    if (editorRef.current) editorRef.current.innerHTML = highlightPlaceholders(resolveMerge(t.body, row, prof));
   }
 
   function exec(cmd: string, value?: string) {
     editorRef.current?.focus();
-    // execCommand is deprecated but remains the pragmatic cross-browser way to
-    // drive a small formatting toolbar without pulling in a full editor lib.
     document.execCommand(cmd, false, value);
   }
-
   const readBody = () => sanitize(stripPlaceholderHighlight(editorRef.current?.innerHTML ?? ""));
 
-  // Guard: never fire a client email with raw [placeholders] in it by accident.
-  function attemptSend() {
-    const left = countPlaceholders(editorRef.current?.innerHTML ?? "");
-    if (left > 0 && !confirmSend) {
-      setConfirmSend(true);
-      toast({
-        title: `${left} placeholder${left === 1 ? "" : "s"} still unfilled`,
-        description: "Fill the highlighted brackets, or press Send again to send anyway.",
-        variant: "destructive",
-      });
-      return;
-    }
-    send.mutate();
+  const chosenTemplate = tmplId != null ? picks.find((t) => t.id === tmplId) ?? null : null;
+
+  // ── Triage ─────────────────────────────────────────────────────────────────
+  const triage = useMutation({
+    mutationFn: (v: string | null) => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/interest`), {
+      method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interest: v }),
+    }),
+    onSuccess: (_r, v) => { setInterest(v); qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); },
+    onError: (e: any) => toast({ title: "Couldn't update triage", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  // ── Analyse (enrich) ─────────────────────────────────────────────────────
+  const analyse = useMutation({
+    mutationFn: () => {
+      const fd = new FormData();
+      fd.append("tSheetUrl", tSheetUrl.trim());
+      fd.append("docUrls", JSON.stringify(pendingLinks));
+      fd.append("keepDocIds", JSON.stringify(existingDocs.filter((d) => d.keep).map((d) => d.id)));
+      for (const f of pendingFiles) fd.append("files", f);
+      return customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/enrich`), { method: "POST", credentials: "include", body: fd });
+    },
+    onSuccess: (r: any) => {
+      setEnrichStatus(r.enrichmentStatus ?? null);
+      setEnrichError(r.enrichmentError ?? null);
+      setExistingDocs((r.docs ?? []).map((d: CtxDoc) => ({ ...d, keep: true })));
+      setPendingLinks([]); setPendingFiles([]);
+      qc.invalidateQueries({ queryKey: ["/api/sales/followups", row.key, "context"] });
+      qc.invalidateQueries({ queryKey: ["/api/sales/followups"] });
+      const msg = r.enrichmentStatus === "ok" ? "Analysed cleanly" : r.enrichmentStatus === "partial" ? "Analysed — some docs couldn't be read" : "Analysis had problems";
+      toast({ title: msg, description: r.enrichmentError ?? undefined, variant: r.enrichmentStatus === "error" ? "destructive" : undefined });
+    },
+    onError: (e: any) => toast({ title: "Analyse failed", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  // ── Generate AI draft ──────────────────────────────────────────────────────
+  const generate = useMutation({
+    mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/generate`), {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateBody: chosenTemplate?.body ?? "", templateIntent: chosenTemplate?.name ?? null }),
+    }),
+    onSuccess: (r: any) => {
+      if (r.subject) setSubject(r.subject);
+      if (editorRef.current) editorRef.current.innerHTML = highlightPlaceholders(resolveMerge(r.bodyHtml ?? "", row, prof));
+      setConfirmSend(false);
+      toast({ title: "Draft generated", description: "Review and edit before sending." });
+    },
+    onError: (e: any) => toast({ title: "Generation failed", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  // ── Growth Prospects document ────────────────────────────────────────────
+  const growthGen = useMutation({
+    mutationFn: (brief?: any) => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/growth-prospects`), {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(brief ? { brief } : {}),
+    }),
+    onSuccess: (r: any) => {
+      setGrowth({ brief: r.brief, docxUrl: r.docxUrl, pdfUrl: r.pdfUrl, needsValidation: r.needsValidation });
+      setBriefEditor(JSON.stringify(r.brief, null, 2));
+      setAttachGrowth(true);
+      qc.invalidateQueries({ queryKey: ["/api/sales/followups"] });
+      toast({ title: "Growth Prospects ready", description: r.pdfError ? "DOCX ready (PDF skipped)." : "DOCX + PDF ready." });
+    },
+    onError: (e: any) => toast({ title: "Couldn't build the document", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+  function reRenderBrief() {
+    try { growthGen.mutate(JSON.parse(briefEditor)); }
+    catch { toast({ title: "That JSON isn't valid", variant: "destructive" }); }
   }
 
+  // ── Save / Send / reply-log ─────────────────────────────────────────────────
   const saveDraft = useMutation({
     mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/draft`), {
-      method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ subject, bodyHtml: readBody(), templateKey: tmplId != null ? String(tmplId) : null }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Draft saved" }); },
@@ -877,11 +1042,11 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
   const send = useMutation({
     mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/send`), {
-      method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         subject, bodyHtml: readBody(), to,
         templateKey: tmplId != null ? String(tmplId) : row.templateKey ?? null,
+        attachGrowthProspects: attachGrowth && Boolean(growth),
       }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Follow-up sent", description: `Emailed ${to}.` }); onClose(); },
@@ -890,41 +1055,57 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
   const mark = useMutation({
     mutationFn: (m: string) => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/mark`), {
-      method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mark: m }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Reply logged" }); },
     onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
   });
 
-  const skip = useMutation({
-    mutationFn: (reason: string | null) => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/skip`), {
-      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason }),
-    }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Marked not targeting" }); onClose(); },
-    onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
-  });
+  function attemptSend() {
+    const left = countPlaceholders(editorRef.current?.innerHTML ?? "");
+    if (left > 0 && !confirmSend) {
+      setConfirmSend(true);
+      toast({ title: `${left} placeholder${left === 1 ? "" : "s"} still unfilled`, description: "Fill the highlighted brackets, or press Send again to send anyway.", variant: "destructive" });
+      return;
+    }
+    send.mutate();
+  }
 
-  const unskip = useMutation({
-    mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/unskip`), { method: "POST", credentials: "include" }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Back on the list" }); },
-    onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
-  });
+  function addLink() {
+    const v = linkInput.trim();
+    if (!v) return;
+    setPendingLinks((ls) => [...ls, v]);
+    setLinkInput("");
+  }
+  function onPickFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length) setPendingFiles((fs) => [...fs, ...files]);
+    e.target.value = "";
+  }
 
   const pm = programMeta(row.program);
   const stg = STAGE_META[(row.stage ?? "").toLowerCase()];
+  const docTotal = existingDocs.filter((d) => d.keep).length + pendingLinks.length + pendingFiles.length;
 
   const ToolBtn = ({ onClick, title, children }: { onClick: () => void; title: string; children: React.ReactNode }) => (
     <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={onClick} title={title}
       className="inline-flex h-8 w-8 items-center justify-center rounded hover:bg-accent">{children}</button>
   );
+  const enrichChip = (() => {
+    switch (enrichStatus) {
+      case "ok": return { label: "Analysed", bg: "#E1F5EE", fg: "#0F6E56", icon: <CheckCircle2 size={12} /> };
+      case "partial": return { label: "Partly analysed", bg: "#FBEEE1", fg: "#A85A1F", icon: <AlertTriangle size={12} /> };
+      case "error": return { label: "Analysis error", bg: "#FBE9EF", fg: "#A32B58", icon: <AlertTriangle size={12} /> };
+      case "running": return { label: "Analysing…", bg: "#E6F1FB", fg: "#0C447C", icon: <Loader2 size={12} className="animate-spin" /> };
+      default: return null;
+    }
+  })();
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative flex h-full w-full max-w-xl flex-col bg-background shadow-2xl">
+      <div className="relative flex h-full w-full max-w-2xl flex-col bg-background shadow-2xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 border-b border-border px-6 py-4">
           <div>
@@ -943,9 +1124,112 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
         {/* Scroll body */}
         <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
-          {/* Template picker */}
+          {/* Step 1 — Triage */}
           <div>
-            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Template</div>
+            <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-[10px] text-background">1</span> Is this worth pursuing?
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {(["interested", "maybe", "not_now"] as const).map((k) => {
+                const m = INTEREST_META[k]; const active = interest === k;
+                return (
+                  <button key={k} disabled={triage.isPending} onClick={() => triage.mutate(active ? null : k)}
+                    className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-60"
+                    style={active ? { background: m.bg, color: m.fg, borderColor: "transparent" } : { borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
+                    {k === "interested" ? <ThumbsUp size={13} /> : k === "maybe" ? <MinusCircle size={13} /> : <ThumbsDown size={13} />} {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            {!actionable && (
+              <p className="mt-2 text-[12px] text-muted-foreground">
+                Mark <strong>Interested</strong> or <strong>Maybe</strong> to analyse, draft and send. <strong>Not now</strong> keeps them off the actionable list.
+              </p>
+            )}
+          </div>
+
+          {/* Step 2 — Analyse (T-sheet + docs) */}
+          <div className={actionable ? "" : "pointer-events-none opacity-50"}>
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-[10px] text-background">2</span> Context to draft from
+              </div>
+              {enrichChip && (
+                <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: enrichChip.bg, color: enrichChip.fg }}>
+                  {enrichChip.icon} {enrichChip.label}
+                </span>
+              )}
+            </div>
+            <label className="block text-sm">
+              <span className="mb-1 block text-[11px] text-muted-foreground">T-sheet URL (Google Sheet)</span>
+              <input value={tSheetUrl} onChange={(e) => setTSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/…"
+                className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
+            </label>
+
+            {/* Doc attach — optional, add as many (or none) */}
+            <div className="mt-3">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-[11px] text-muted-foreground">Meeting docs (optional — Google Doc links and/or uploads)</span>
+                <span className="text-[11px] text-muted-foreground">{docTotal} attached</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Link2 size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <input value={linkInput} onChange={(e) => setLinkInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLink(); } }}
+                    placeholder="Paste a Google Doc link"
+                    className="w-full rounded-md border border-border bg-card py-1.5 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
+                </div>
+                <button onClick={addLink} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent"><Plus size={13} /> Add link</button>
+                <button onClick={() => fileRef.current?.click()} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent"><Paperclip size={13} /> Upload</button>
+                <input ref={fileRef} type="file" multiple accept=".pdf,.docx,.txt,.md,.vtt,.srt" className="hidden" onChange={onPickFiles} />
+              </div>
+
+              {/* Chips */}
+              {(existingDocs.length > 0 || pendingLinks.length > 0 || pendingFiles.length > 0) && (
+                <div className="mt-2 space-y-1.5">
+                  {existingDocs.map((d) => (
+                    <div key={`e${d.id}`} className="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs" style={{ opacity: d.keep ? 1 : 0.4 }}>
+                      {d.sourceType === "gdoc" ? <Link2 size={13} /> : <FileText size={13} />}
+                      <span className="min-w-0 flex-1 truncate">{d.title || (d.sourceType === "gdoc" ? "Google Doc" : "File")}</span>
+                      {d.status === "error"
+                        ? <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "#A32B58" }} title={d.error ?? ""}><AlertTriangle size={11} /> couldn’t open</span>
+                        : <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "#0F6E56" }}><CheckCircle2 size={11} /> read</span>}
+                      <button onClick={() => setExistingDocs((ds) => ds.map((x) => x.id === d.id ? { ...x, keep: !x.keep } : x))} className="rounded p-0.5 hover:bg-accent" title={d.keep ? "Remove on next analyse" : "Keep"}>
+                        {d.keep ? <Trash2 size={13} /> : <Undo2 size={13} />}
+                      </button>
+                    </div>
+                  ))}
+                  {pendingLinks.map((l, i) => (
+                    <div key={`l${i}`} className="flex items-center gap-2 rounded-md border border-dashed border-border bg-card px-2.5 py-1.5 text-xs">
+                      <Link2 size={13} /><span className="min-w-0 flex-1 truncate">{l}</span>
+                      <span className="text-[11px] text-muted-foreground">new · analyse to read</span>
+                      <button onClick={() => setPendingLinks((ls) => ls.filter((_, j) => j !== i))} className="rounded p-0.5 hover:bg-accent"><X size={13} /></button>
+                    </div>
+                  ))}
+                  {pendingFiles.map((f, i) => (
+                    <div key={`f${i}`} className="flex items-center gap-2 rounded-md border border-dashed border-border bg-card px-2.5 py-1.5 text-xs">
+                      <FileText size={13} /><span className="min-w-0 flex-1 truncate">{f.name}</span>
+                      <span className="text-[11px] text-muted-foreground">new · analyse to read</span>
+                      <button onClick={() => setPendingFiles((fs) => fs.filter((_, j) => j !== i))} className="rounded p-0.5 hover:bg-accent"><X size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {enrichError && <p className="mt-1.5 text-[11px]" style={{ color: "#A85A1F" }}>{enrichError}</p>}
+
+              <button onClick={() => analyse.mutate()} disabled={!actionable || analyse.isPending || (!tSheetUrl.trim() && docTotal === 0)}
+                className="mt-2 inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent disabled:opacity-60">
+                {analyse.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                {enrichStatus ? "Re-analyse" : "Analyse"}
+              </button>
+            </div>
+          </div>
+
+          {/* Step 3 — Draft */}
+          <div className={actionable ? "" : "pointer-events-none opacity-50"}>
+            <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-[10px] text-background">3</span> Draft the email
+            </div>
             <div className="grid gap-2 sm:grid-cols-3">
               {picks.map((t) => {
                 const active = tmplId === t.id;
@@ -962,6 +1246,12 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
                 );
               })}
             </div>
+            <button onClick={() => generate.mutate()} disabled={!actionable || generate.isPending || !chosenTemplate}
+              className="mt-2 inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-white disabled:opacity-60" style={{ background: GOLD }}>
+              {generate.isPending ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+              {generate.isPending ? "Generating…" : "Generate AI draft"}
+            </button>
+            {!chosenTemplate && <span className="ml-2 text-[11px] text-muted-foreground">Pick a template first.</span>}
           </div>
 
           {/* To + Subject */}
@@ -991,35 +1281,78 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
                 <ToolBtn onClick={() => exec("insertUnorderedList")} title="Bulleted list"><List size={15} /></ToolBtn>
                 <ToolBtn onClick={() => exec("insertOrderedList")} title="Numbered list"><ListOrdered size={15} /></ToolBtn>
               </div>
-              <div
-                ref={editorRef}
-                contentEditable
-                suppressContentEditableWarning
-                data-testid="followup-editor"
-                className="prose prose-sm min-h-[220px] max-w-none px-3 py-3 text-sm outline-none [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5"
-              />
+              <div ref={editorRef} contentEditable suppressContentEditableWarning data-testid="followup-editor"
+                className="prose prose-sm min-h-[200px] max-w-none px-3 py-3 text-sm outline-none [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5" />
             </div>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">Make your final edits above — bold, italics, highlight, and lists all carry into the email.</p>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">Highlighted [brackets] still need filling. Bold, italics, highlight and lists all carry into the email.</p>
+          </div>
+
+          {/* Step 4 — Growth Prospects document */}
+          <div className={actionable ? "" : "pointer-events-none opacity-50"}>
+            <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-[10px] text-background">4</span> Growth Prospects document (optional attachment)
+            </div>
+            {!growth ? (
+              <button onClick={() => growthGen.mutate(undefined)} disabled={!actionable || growthGen.isPending}
+                className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent disabled:opacity-60">
+                {growthGen.isPending ? <Loader2 size={15} className="animate-spin" /> : <FileType2 size={15} />}
+                Generate Growth Prospects
+              </button>
+            ) : (
+              <div className="rounded-lg border border-border bg-card p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-medium">{growth.brief?.headline || "Growth Prospects"}</div>
+                    <div className="mt-0.5 text-[12px] text-muted-foreground">{growth.brief?.oneLiner}</div>
+                  </div>
+                  <button onClick={() => growthGen.mutate(undefined)} disabled={growthGen.isPending} title="Regenerate from AI"
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-60">
+                    {growthGen.isPending ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Regenerate
+                  </button>
+                </div>
+                {Array.isArray(growth.brief?.statTiles) && growth.brief.statTiles.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {growth.brief.statTiles.map((t: any, i: number) => (
+                      <span key={i} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium" style={{ background: "#EEF2F7", color: "#17335C" }}>
+                        <strong>{t.value}</strong> {t.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {Array.isArray(growth.needsValidation) && growth.needsValidation.length > 0 && (
+                  <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+                    <strong>Confirm before sending:</strong> {growth.needsValidation.join("; ")}
+                  </div>
+                )}
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                  {growth.docxUrl && <a href={growth.docxUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline"><Download size={13} /> DOCX</a>}
+                  {growth.pdfUrl
+                    ? <a href={growth.pdfUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline"><Download size={13} /> PDF</a>
+                    : <span className="text-muted-foreground">PDF not produced</span>}
+                  <label className="ml-auto inline-flex items-center gap-1.5">
+                    <input type="checkbox" checked={attachGrowth} onChange={(e) => setAttachGrowth(e.target.checked)} /> Attach to email
+                  </label>
+                </div>
+                <button onClick={() => setShowBriefJson((s) => !s)} className="mt-2 text-[11px] text-muted-foreground underline-offset-2 hover:underline">
+                  {showBriefJson ? "Hide" : "Edit fields (advanced) — re-render without AI"}
+                </button>
+                {showBriefJson && (
+                  <div className="mt-2">
+                    <textarea value={briefEditor} onChange={(e) => setBriefEditor(e.target.value)} spellCheck={false}
+                      className="h-40 w-full rounded-md border border-border bg-background p-2 font-mono text-[11px] outline-none focus:ring-2 focus:ring-ring/40" />
+                    <button onClick={reRenderBrief} disabled={growthGen.isPending}
+                      className="mt-1 inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-60">
+                      {growthGen.isPending ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Re-render from edits
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Footer */}
         <div className="border-t border-border px-6 py-4">
-          {/* Not-targeting gate — the "willing to contact?" decision. */}
-          {row.skipped ? (
-            <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
-              <span className="inline-flex items-center gap-1.5 text-muted-foreground"><Ban size={13} /> Not targeting{row.skipReason ? ` — ${row.skipReason}` : ""}</span>
-              <button onClick={() => unskip.mutate()} disabled={unskip.isPending} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 hover:bg-accent disabled:opacity-60"><Undo2 size={12} /> Put back on list</button>
-            </div>
-          ) : (
-            <div className="mb-3 flex items-center gap-2">
-              <span className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Not targeting?</span>
-              <input value={skipReason} onChange={(e) => setSkipReason(e.target.value)} placeholder="Optional reason (e.g. out of business)"
-                className="flex-1 rounded-md border border-border bg-card px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-ring/40" />
-              <button onClick={() => skip.mutate(skipReason.trim() || null)} disabled={skip.isPending}
-                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-60"><Ban size={12} /> Skip</button>
-            </div>
-          )}
           <div className="mb-3 flex items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Log reply</span>
             <button onClick={() => mark.mutate("interested")} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent" style={{ color: "#0F6E56" }}><ThumbsUp size={12} /> Interested</button>
@@ -1031,11 +1364,11 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
               className="inline-flex items-center gap-2 rounded-md border border-border px-3.5 py-2 text-sm font-medium hover:bg-accent disabled:opacity-60" data-testid="button-save-draft">
               {saveDraft.isPending ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save draft
             </button>
-            <button onClick={attemptSend} disabled={send.isPending || !to}
+            <button onClick={attemptSend} disabled={!actionable || send.isPending || !to}
               className="inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
               style={{ background: confirmSend ? "hsl(0 65% 42%)" : "hsl(222 47% 20%)" }} data-testid="button-send-followup">
               {send.isPending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
-              {confirmSend ? "Send anyway" : "Send follow-up"}
+              {confirmSend ? "Send anyway" : attachGrowth && growth ? "Send with document" : "Send follow-up"}
             </button>
           </div>
         </div>
@@ -1479,8 +1812,12 @@ type OpsConsultant = {
   host: string;
   matchedUser: { id: number; name: string; email: string } | null;
   cohorts: string[];
-  companies: number; reached: number; pending: number; due: number;
-  sent: number; replied: number; drafted: number; skipped: number; completionPct: number;
+  companies: number; assigned: number; interestedOrMaybe: number;
+  reached: number; pending: number; due: number;
+  sent: number; nudgesDue: number; replied: number;
+  repliedInterested: number; repliedNotNow: number;
+  drafted: number; notNow: number; skipped: number;
+  replyRate: number; behind: boolean; completionPct: number;
 };
 function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohorts: string[]; onCohort: (c: string | null) => void }) {
   const cohortParam = cohort ? `?cohort=${encodeURIComponent(cohort)}` : "";
@@ -1529,17 +1866,18 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
             <thead>
               <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
                 <th className="px-5 py-2.5 font-medium">Consultant</th>
-                <th className="px-3 py-2.5 font-medium">Companies</th>
-                <th className="px-3 py-2.5 font-medium">Reached out</th>
+                <th className="px-3 py-2.5 font-medium">Interested / Maybe</th>
+                <th className="px-3 py-2.5 font-medium">Sent</th>
                 <th className="px-3 py-2.5 font-medium">Pending</th>
+                <th className="px-3 py-2.5 font-medium">Nudges due</th>
                 <th className="px-3 py-2.5 font-medium">Replied</th>
-                <th className="px-3 py-2.5 font-medium">Not targeting</th>
-                <th className="px-3 py-2.5 font-medium">Coverage</th>
+                <th className="px-3 py-2.5 font-medium">Reply outcomes</th>
+                <th className="px-3 py-2.5 font-medium">Reply rate</th>
               </tr>
             </thead>
             <tbody>
               {list.map((c) => {
-                const done = c.pending === 0;
+                const done = c.pending === 0 && c.interestedOrMaybe > 0;
                 return (
                   <tr key={c.host} className="border-b border-border/60">
                     <td className="px-5 py-3">
@@ -1549,21 +1887,30 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
                         {c.cohorts.length ? ` · ${c.cohorts.join(", ")}` : ""}
                       </div>
                     </td>
-                    <td className="px-3 py-3 tabular-nums">{c.companies}</td>
-                    <td className="px-3 py-3 tabular-nums">{c.reached}</td>
+                    <td className="px-3 py-3 tabular-nums">{c.interestedOrMaybe}<span className="text-xs text-muted-foreground"> / {c.assigned}</span></td>
+                    <td className="px-3 py-3 tabular-nums">{c.sent}</td>
                     <td className="px-3 py-3">
                       {c.pending > 0
                         ? <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "hsl(36 70% 92%)", color: "#8A5A00" }}>{c.pending} to send</span>
-                        : <span className="inline-flex items-center gap-1 text-[12px]" style={{ color: "var(--success)" }}><CheckCircle2 size={13} /> Done</span>}
+                        : c.interestedOrMaybe > 0
+                          ? <span className="inline-flex items-center gap-1 text-[12px]" style={{ color: "var(--success)" }}><CheckCircle2 size={13} /> Done</span>
+                          : <span className="text-muted-foreground">—</span>}
+                    </td>
+                    <td className="px-3 py-3">
+                      {c.nudgesDue > 0
+                        ? <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "#FBEEE1", color: "#A85A1F" }}><Clock size={11} /> {c.nudgesDue}</span>
+                        : <span className="text-muted-foreground">0</span>}
                     </td>
                     <td className="px-3 py-3 tabular-nums">{c.replied}</td>
-                    <td className="px-3 py-3 tabular-nums text-muted-foreground">{c.skipped}</td>
+                    <td className="px-3 py-3 text-[11px]">
+                      <span style={{ color: "#0F6E56" }}>{c.repliedInterested} interested</span>
+                      <span className="text-muted-foreground"> · {c.repliedNotNow} not now</span>
+                    </td>
                     <td className="px-3 py-3">
                       <div className="flex items-center gap-2">
-                        <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
-                          <div className="h-full rounded-full" style={{ width: `${c.completionPct}%`, background: done ? "var(--success)" : GOLD }} />
-                        </div>
-                        <span className="tabular-nums text-xs text-muted-foreground">{c.completionPct}%</span>
+                        <span className="tabular-nums text-sm font-medium" style={{ color: c.behind ? "#A32B58" : undefined }}>{c.replyRate}%</span>
+                        {c.behind && c.sent > 0 && <span className="rounded-full px-2 py-0.5 text-[10px] font-medium" style={{ background: "#FBE9EF", color: "#A32B58" }}>behind</span>}
+                        {done && <CheckCircle2 size={13} style={{ color: "var(--success)" }} />}
                       </div>
                     </td>
                   </tr>
@@ -1574,7 +1921,7 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
         </div>
       )}
       <div className="border-t border-border px-5 py-3 text-[11px] text-muted-foreground">
-        Coverage = reached out ÷ (reached out + still-to-contact). Companies marked “Not targeting” are excluded.
+        Only companies triaged <strong>Interested</strong> or <strong>Maybe</strong> count as “should follow up”. Reply rate = replied ÷ sent; “behind” flags a rate under 30%.
       </div>
     </div>
   );

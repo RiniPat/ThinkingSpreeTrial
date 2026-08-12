@@ -28,6 +28,12 @@ export const salesFollowupsTable = pgTable("sales_followups", {
   lastSprintDate: date("last_sprint_date"),
   sprintCompleted: boolean("sprint_completed"),
 
+  // Triage (migration 024). Drives the triage-first UX; independent of `skipped`
+  // and `status`. Only `interested`/`maybe` can be drafted/sent and count in Ops
+  // "should-have-sent". `not_now` = client not interested. NULL = untriaged.
+  interest: text("interest"), // 'interested' | 'maybe' | 'not_now' | NULL
+  interestSetAt: timestamp("interest_set_at", { withTimezone: true }),
+
   // App-owned lifecycle
   status: text("status"), // draft | sent | no_reply | replied_not_now | replied_interested | bounced (NULL ⇒ derive)
 
@@ -71,6 +77,10 @@ export type ReplyState = (typeof REPLY_STATES)[number];
 
 export const TEMPLATE_KEYS = ["checkin", "next_sprint", "nudge"] as const;
 export type TemplateKey = (typeof TEMPLATE_KEYS)[number];
+
+/** Triage states (migration 024). Only interested/maybe are actionable. */
+export const INTEREST_STATES = ["interested", "maybe", "not_now"] as const;
+export type InterestState = (typeof INTEREST_STATES)[number];
 
 export const insertSalesFollowupSchema = createInsertSchema(salesFollowupsTable).omit({
   id: true, createdAt: true, updatedAt: true,

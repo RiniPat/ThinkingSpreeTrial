@@ -17,8 +17,9 @@ import {
   getModel, isGeminiConfigured as isConfigured, MODEL_LITE, MODEL_STANDARD,
   stripJsonFences, parseJsonLoose, memoAsync, hashKey, TTL,
 } from "./aiClient";
+import type { GrowthProspectsBrief } from "./growthProspectsLayout";
 
-export type EmailKind = "pre" | "post";
+export type EmailKind = "pre" | "post" | "followup";
 
 export type EmailContext = {
   /** Company name (e.g. "Lumen Diagnostics"). */
@@ -60,6 +61,16 @@ export type EmailContext = {
   nextSprintNumber?: string | null;
   nextSprintDate?: string | null;
   nextSprintTime?: string | null;
+
+  // ── Sales follow-up ("followup" kind) ─────────────────────────────────────
+  /** Triage state — 'interested' or 'maybe' (only these get drafted). */
+  interest?: string | null;
+  /** Short label of the chosen template's intent (e.g. "Catch-up"). */
+  templateIntent?: string | null;
+  /** Summary of the consultant's T-sheet (from enrichment). */
+  tSheetSummary?: string | null;
+  /** Combined summary across all submitted meeting docs (from enrichment). */
+  docsSummary?: string | null;
 };
 
 export type GeneratedEmail = { subject: string; body: string };
@@ -119,7 +130,64 @@ Team Thinking Spree.`;
  * model otherwise loves inventing details about the SWOT or vision when
  * a field is null. The rules below tell it to omit, not invent.
  */
+/**
+ * Sales follow-up prompt. Distinct from pre/post: the scaffold is an HTML
+ * template from the follow-up playbook and the output is HTML (not plain text
+ * with **bold**). Grounds the personalisation in the T-sheet + docs summaries
+ * and the sprint facts; preserves the price + unknown [Square Bracket]
+ * placeholders verbatim.
+ */
+function buildFollowupPrompt(ctx: EmailContext, templateOverride?: string | null): string {
+  const template = (templateOverride && templateOverride.trim()) ? templateOverride.trim() : "";
+
+  const fields: Record<string, string | null> = {
+    "Founder / First name": ctx.founderName,
+    "Company Name":         ctx.companyName,
+    "Cohort / Program":     ctx.cohort,
+    "Sprint Host":          ctx.sprintHost,
+    "Co-Host":              ctx.coHost,
+    "Last sprint date":     ctx.sprintDate,
+    "Interest (triage)":    ctx.interest ?? null,
+    "Template intent":      ctx.templateIntent ?? null,
+  };
+  const ctxLines = Object.entries(fields)
+    .map(([k, v]) => `- ${k}: ${v ?? "(not provided)"}`)
+    .join("\n");
+
+  const tSheet = ctx.tSheetSummary?.trim();
+  const docs = ctx.docsSummary?.trim();
+  const groundingBlock = [
+    tSheet ? `T-SHEET SUMMARY (the consultant's sprint workbook — real facts about the company):\n"""\n${tSheet.slice(0, 4000)}\n"""` : "",
+    docs ? `MEETING DOCS SUMMARY (what was discussed in sessions — decisions, blockers, next steps):\n"""\n${docs.slice(0, 4000)}\n"""` : "",
+  ].filter(Boolean).join("\n\n");
+  const grounding = groundingBlock
+    ? `\nGROUNDING CONTEXT — use these to make the email specific and warm. Reference the ACTUAL work; do NOT fabricate details beyond what is here:\n${groundingBlock}\n`
+    : "\nGROUNDING CONTEXT: none beyond the sprint facts above. Do NOT invent meeting specifics — keep the email grounded in the template intent and the sprint facts only.\n";
+
+  return `You are a senior consultant at Thinking Spree, a venture-focused strategy firm in India. You are drafting a warm SALES FOLLOW-UP email to a founder we have already run T-Sprint sessions with. The goal is to earn a reply.
+
+CONTEXT — fields from the company's record:
+${ctxLines}
+${grounding}
+TEMPLATE — use this HTML as the structural scaffold and voice. It uses [Square Bracket] merge-field placeholders. Personalise the prose so it references this specific company's actual work (from the grounding context), but keep the template's structure, paragraphs and lists.
+
+${template || "(no template supplied — write a short, warm 4–6 sentence catch-up email in the same voice.)"}
+
+STRICT RULES
+1. Output JSON ONLY — no markdown fences, no preamble. Shape: { "subject": "...", "body": "..." }
+2. "body" is HTML using ONLY these tags: <p>, <br>, <strong>, <em>, <u>, <ul>, <ol>, <li>, <a>. No headings, no inline styles, no other tags. Preserve the template's paragraph/list structure.
+3. NEVER invent a price, fee, or amount. The literal placeholder "₹[amount] plus GST" MUST appear verbatim, unchanged, wherever the template has it — the consultant fills it. Do not add a price where the template has none.
+4. Auto-fill ONLY these merge fields from the CONTEXT: [First Name] → the founder/first name, [Company] → the company name. Leave EVERY other [Square Bracket] placeholder (e.g. [Name], [Title], [Phone], [Calendar link], [Option 1], [previous growth priority], [specific challenge], [amount]) EXACTLY as written — the app fills the sign-off fields and the consultant fills the judgement calls. Do NOT delete or guess them.
+5. Where the template has a judgement-call placeholder like [previous growth priority] or [specific challenge], you MAY replace it with a specific, TRUE detail drawn from the grounding context if one clearly applies; otherwise leave the placeholder untouched. Never fabricate.
+6. Tone: warm, specific, professional, Indian English. No emoji. No hype. Reference the real work when the grounding context supports it.
+7. Subject line: specific, mentions the company name. If the template has a subject-like first line, adapt it.
+8. Keep it concise — a founder should be able to read it in under a minute.
+
+Return only the JSON object.`;
+}
+
 function buildPrompt(kind: EmailKind, ctx: EmailContext, templateOverride?: string | null): string {
+  if (kind === "followup") return buildFollowupPrompt(ctx, templateOverride);
   // When the consultant picks a template from the Emails tab library we use
   // that verbatim as the scaffold; otherwise we fall back to the two built-in
   // templates so the existing company-level composer keeps working unchanged.
@@ -384,4 +452,231 @@ RULES
       cohort: clean(parsed.cohort),
     };
   });
+}
+
+// ──────────────────────── Sales follow-up enrichment ───────────────────────
+
+/**
+ * Summarise a consultant's T-sheet (flattened to plain text) into a compact,
+ * email-useful profile: what the company does, stage, key figures (revenue,
+ * users, team, milestones), strengths, gaps and goals. Faithful, not creative.
+ * Low temperature + cached (the same sheet text recurs across Generate/Re-draft).
+ */
+export async function summariseTSheet(sheetText: string): Promise<string> {
+  if (!isConfigured()) throw new Error("GEMINI_API_KEY is not configured on the server.");
+  const content = (sheetText ?? "").trim();
+  if (!content) return "";
+  const bounded = content.slice(0, 12000);
+
+  return memoAsync(hashKey("tSheetSummary", bounded), TTL.long, async () => {
+    const model = getModel({
+      model: MODEL_LITE,
+      generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
+    });
+    const prompt = `You are reading a startup's T-Sprint workbook ("T-sheet"), flattened to text. Summarise it into a compact, factual profile a consultant can use to write a follow-up email.
+
+T-SHEET CONTENT (flattened cells, may be noisy):
+"""
+${bounded}
+"""
+
+Return JSON ONLY, no fences: { "summary": "..." }
+
+RULES
+1. 120–200 words. Plain prose or short labelled lines; no markdown fences.
+2. Capture: what the company does, stage, and any REAL figures present (revenue, users, team size, sessions run, before/after counts, milestones), plus key strengths, the main gap/constraint, and stated goals.
+3. Use ONLY facts present in the sheet. Do NOT invent numbers or details. If a figure isn't there, don't state one.
+4. Keep numbers exactly as written (currency, units).
+5. No commentary about the sheet itself.`;
+    const parsed = parseJsonLoose<{ summary?: string }>((await model.generateContent(prompt)).response.text(), { summary: "" });
+    return (parsed.summary ?? "").trim();
+  });
+}
+
+/**
+ * Summarise ALL submitted meeting docs together into one factual, email-useful
+ * summary: what was discussed, decisions, blockers, next steps, objections,
+ * commitments. Returns "" when no docs were submitted.
+ */
+export async function summariseFollowupDocs(docs: { title: string; text: string }[]): Promise<string> {
+  if (!isConfigured()) throw new Error("GEMINI_API_KEY is not configured on the server.");
+  const usable = (docs ?? []).filter((d) => d.text && d.text.trim());
+  if (usable.length === 0) return "";
+
+  // Bound each doc so a single huge transcript can't blow the context window.
+  const PER_DOC = Math.max(1500, Math.floor(24000 / usable.length));
+  const joined = usable
+    .map((d, i) => `--- DOC ${i + 1}: ${d.title || "Untitled"} ---\n${d.text.trim().slice(0, PER_DOC)}`)
+    .join("\n\n");
+
+  return memoAsync(hashKey("followupDocsSummary", joined), TTL.long, async () => {
+    const model = getModel({
+      model: MODEL_STANDARD,
+      generationConfig: { temperature: 0.3, responseMimeType: "application/json" },
+    });
+    const prompt = `You are summarising the meeting material a startup consultant submitted (session transcripts / notes) so it can inform a warm follow-up email.
+
+DOCUMENTS:
+"""
+${joined}
+"""
+
+Return JSON ONLY, no fences: { "summary": "..." }
+
+RULES
+1. 120–220 words. Factual and specific.
+2. Capture: what was discussed, decisions made, blockers/constraints raised, agreed next steps, objections, and any commitments.
+3. Use ONLY what is in the documents. Do NOT invent details. If the docs are thin, produce a short summary rather than padding.
+4. No markdown fences, no meta-commentary.`;
+    const parsed = parseJsonLoose<{ summary?: string }>((await model.generateContent(prompt)).response.text(), { summary: "" });
+    return (parsed.summary ?? "").trim();
+  });
+}
+
+// ──────────────────────── Growth Prospects brief (§11) ─────────────────────
+
+/**
+ * Generate the strict JSON brief-model (§11.2) for the one-page, client-facing
+ * "Growth Prospects" document. The model returns JSON ONLY; the code draws the
+ * DOCX/PDF from it. Numbers must come from the T-sheet or be clearly-labelled
+ * projections — never fabricated. Not cached (regenerable on demand).
+ */
+export async function generateGrowthProspectsBrief(input: {
+  companyName: string;
+  founderName: string;
+  cohort: string | null;
+  sprintHost: string | null;
+  tSheetSummary: string | null;
+  docsSummary: string | null;
+}): Promise<GrowthProspectsBrief> {
+  if (!isConfigured()) throw new Error("GEMINI_API_KEY is not configured on the server.");
+
+  const model = getModel({
+    model: MODEL_STANDARD,
+    generationConfig: { temperature: 0.5, responseMimeType: "application/json" },
+  });
+
+  const system = `You are a senior growth strategist at Thinking Spree, a startup-consulting firm in India. You are writing the content for a ONE-PAGE, client-facing "Growth Prospects" document that will be attached to a follow-up email to a founder we have already run T-Sprint sessions with. The goal of this document is to earn a reply: remind the founder of the value we created, show momentum with real figures from their sprint sheet, and make the next 3-6 months feel concrete, credible, and worth a conversation.
+
+You will be given: (1) the company's T-sheet extract (sprint sheet: goals, strengths, gaps, milestones, financials), and (2) summaries/transcripts of the sessions. Base EVERYTHING you write only on these inputs plus the sprint facts provided. Do not use outside knowledge about the company.
+
+Write the content as a structured JSON object matching the schema you are given. Output ONLY valid JSON - no commentary, no markdown code fences.
+
+Voice and style:
+- Speak to the founder in warm, direct second person ("you", "your team", "your growth").
+- Data-led and specific. Prefer numbers, deltas, and concrete outcomes over adjectives.
+- Realistic and credible, never hype. No superlatives, no vague "unlock/synergy/game-changing" language.
+- Concise to the point of discipline - every field has a word cap; respect it. This must fit on a single page, so shorter is better.
+- Indian context: currency in INR (₹), Indian English.
+
+Hard rules:
+- NEVER invent a number, metric, date, or fact. Take figures from the T-sheet. If the T-sheet has no number for a point, do NOT guess or estimate one - express that point QUALITATIVELY instead (a short factual descriptor, kind: "qualitative"). Only put a figure you genuinely cannot source but that would strengthen the doc into needsValidation for the consultant to confirm.
+- Anything forward-looking (the plan, projectedImpact) must be framed as a target/projection, grounded in the current baseline from the inputs and a realistic improvement - not a promise. Keep targets defensible (modest multiples, not moonshots).
+- Do NOT include any price, fee, or ₹ amount for our services - the email carries the commercial offer, not this sheet.
+- The plan must trace back to the actual gap/constraint identified in the T-sheet, and each phase must have a concrete, checkable outcome.
+- If the inputs are thin, produce fewer tiles/phases rather than padding. A short, honest brief beats a padded one.
+
+SCHEMA (respect every word cap and array-length cap - these keep it to one page):
+{
+  "companyName": string,
+  "founderName": string,
+  "oneLiner": string,            // what the company does, <= 14 words
+  "headline": string,            // catchy transformation promise, <= 10 words
+  "sessionRecap": string[],      // 2-3 bullets, what we worked on, <= 12 words each
+  "statTiles": [                 // 2-4 tiles
+    { "label": string,           // <= 4 words
+      "value": string,           // number from T-sheet OR short qualitative descriptor
+      "kind": "number" | "qualitative",
+      "sub": string }            // optional, <= 6 words
+  ],
+  "beforeAfter": [               // 0-3 rows, grounded
+    { "dimension": string, "before": string, "after": string }  // before/after <= 8 words
+  ],
+  "keyStrength": string,         // 1 line, grounded, <= 16 words
+  "keyGap": string,              // 1 line, the constraint we'd tackle, <= 16 words
+  "plan": [                      // 2-4 phases, 3-6 month path
+    { "phase": string,           // e.g. "Weeks 1-4"
+      "focus": string,           // <= 10 words
+      "expectedOutcome": string, // <= 12 words, concrete
+      "metric": string }         // optional target if grounded
+  ],
+  "projectedImpact": [           // 0-2, MUST be labelled projections/targets
+    { "metric": string, "from": string, "to": string, "timeframe": string }
+  ],
+  "whyThinkingSpree": string,    // 1 punchy credibility line, <= 18 words
+  "cta": string,                 // 1 soft line aligned with the email, <= 16 words
+  "needsValidation": string[]    // fields the consultant must confirm before sending
+}`;
+
+  const user = `INPUTS
+
+Company: ${input.companyName}
+Founder: ${input.founderName}
+Cohort / Program: ${input.cohort ?? "(not provided)"}
+Sprint host: ${input.sprintHost ?? "(not provided)"}
+
+T-SHEET EXTRACT:
+"""
+${(input.tSheetSummary ?? "(none provided)").slice(0, 6000)}
+"""
+
+SESSION SUMMARIES / TRANSCRIPTS:
+"""
+${(input.docsSummary ?? "(none provided)").slice(0, 6000)}
+"""
+
+Produce the Growth Prospects brief JSON now.`;
+
+  const result = await model.generateContent(`${system}\n\n${user}`);
+  const raw = result.response.text();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(stripJsonFences(raw));
+  } catch {
+    throw new Error(`Gemini returned non-JSON for the Growth Prospects brief. Raw: ${raw.slice(0, 300)}…`);
+  }
+  return normaliseGrowthBrief(parsed, input.companyName, input.founderName);
+}
+
+/** Defensive shaping so a slightly-off model response can't crash a renderer. */
+function normaliseGrowthBrief(x: any, companyName: string, founderName: string): GrowthProspectsBrief {
+  const str = (v: unknown, cap = 400) => (typeof v === "string" ? v.trim().slice(0, cap) : "");
+  const arr = (v: unknown): any[] => (Array.isArray(v) ? v : []);
+  const strList = (v: unknown, max: number, cap = 200) =>
+    arr(v).map((s) => str(s, cap)).filter(Boolean).slice(0, max);
+  return {
+    companyName: str(x?.companyName) || companyName,
+    founderName: str(x?.founderName) || founderName,
+    oneLiner: str(x?.oneLiner),
+    headline: str(x?.headline),
+    sessionRecap: strList(x?.sessionRecap, 3),
+    statTiles: arr(x?.statTiles).slice(0, 4).map((t) => ({
+      label: str(t?.label, 60),
+      value: str(t?.value, 60),
+      kind: (t?.kind === "number" ? "number" : "qualitative") as "number" | "qualitative",
+      sub: str(t?.sub, 80) || undefined,
+    })).filter((t) => t.label && t.value),
+    beforeAfter: arr(x?.beforeAfter).slice(0, 3).map((b) => ({
+      dimension: str(b?.dimension, 80),
+      before: str(b?.before, 120),
+      after: str(b?.after, 120),
+    })).filter((b) => b.dimension),
+    keyStrength: str(x?.keyStrength),
+    keyGap: str(x?.keyGap),
+    plan: arr(x?.plan).slice(0, 4).map((p) => ({
+      phase: str(p?.phase, 40),
+      focus: str(p?.focus, 120),
+      expectedOutcome: str(p?.expectedOutcome, 160),
+      metric: str(p?.metric, 80) || undefined,
+    })).filter((p) => p.phase && p.focus),
+    projectedImpact: arr(x?.projectedImpact).slice(0, 2).map((p) => ({
+      metric: str(p?.metric, 80),
+      from: str(p?.from, 80),
+      to: str(p?.to, 80),
+      timeframe: str(p?.timeframe, 60),
+    })).filter((p) => p.metric),
+    whyThinkingSpree: str(x?.whyThinkingSpree),
+    cta: str(x?.cta),
+    needsValidation: strList(x?.needsValidation, 8),
+  };
 }

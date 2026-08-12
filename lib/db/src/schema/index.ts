@@ -18,3 +18,5 @@ export * from "./contacts";
 export * from "./competitiveMaps";
 
 export * from "./salesFollowups";
+export * from "./salesFollowupContext";
+export * from "./salesFollowupDocs";

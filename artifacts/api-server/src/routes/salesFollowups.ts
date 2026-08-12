@@ -18,15 +18,40 @@
  * "column not found" flag (the UI shows a banner); nothing is marked Due.
  */
 import { Router } from "express";
+import multer from "multer";
 import {
   db, salesFollowupsTable, emailTemplatesTable, usersTable, makeClientKey,
   canViewSalesOps, isConsultantScoped,
+  salesFollowupContextTable, salesFollowupDocsTable, INTEREST_STATES,
 } from "@workspace/db";
 import { eq, inArray, and, asc } from "drizzle-orm";
 import { google } from "googleapis";
 import sanitizeHtmlLib from "sanitize-html";
 import { getAuthedClient } from "../lib/google";
 import { extractSheetId } from "../lib/sheetsFetcher";
+import { enrichFollowup, type UploadInput } from "../lib/followupEnrich";
+import { generateEmail, generateGrowthProspectsBrief } from "../lib/gemini";
+import { renderGrowthProspectsDocx } from "../lib/growthProspectsDocx";
+import { renderGrowthProspectsPdf } from "../lib/growthProspectsPdf";
+import { growthProspectsFileStem, type GrowthProspectsBrief } from "../lib/growthProspectsLayout";
+import { driveFor, ensureSalesFolder, uploadToDrive, downloadDriveFile, deleteDriveFile } from "../lib/salesDrive";
+
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024, files: 12 } });
+
+// Only companies with a sprint on/after this date surface in the follow-up UX.
+// Compared as calendar dates (YYYY-MM-DD), which is timezone-independent.
+const SALES_ENGAGEMENT_CUTOFF = (process.env.SALES_ENGAGEMENT_CUTOFF?.trim() || "2026-04-01").slice(0, 10);
+
+/** True when the row's last sprint is on/after the engagement cutoff. */
+function withinEngagementCutoff(lastSprintDate: string | null): boolean {
+  if (!lastSprintDate) return false;
+  return String(lastSprintDate).slice(0, 10) >= SALES_ENGAGEMENT_CUTOFF;
+}
+
+/** Only interested/maybe are actionable (draft / generate / enrich / send). */
+const ACTIONABLE_INTEREST = new Set(["interested", "maybe"]);
 
 const router = Router();
 
@@ -318,33 +343,82 @@ function effectiveStatus(row: typeof salesFollowupsTable.$inferSelect): string {
   return "not_due";
 }
 
-function buildListPayload(rows: (typeof salesFollowupsTable.$inferSelect)[], hasCompletedColumn: boolean) {
+// Sent / awaiting / nudge signals — computed server-side, never stored (§3.5).
+const SENT_LIKE = new Set(["sent", "no_reply", "replied", "replied_interested", "replied_not_now"]);
+const REPLIED_LIKE = new Set(["replied", "replied_interested", "replied_not_now"]);
+function hasReplied(r: typeof salesFollowupsTable.$inferSelect): boolean {
+  return Boolean(r.replyDetectedAt) || r.replyState === "interested" || r.replyState === "not_now"
+    || r.status === "replied_interested" || r.status === "replied_not_now";
+}
+function rowHasSent(r: typeof salesFollowupsTable.$inferSelect): boolean {
+  return SENT_LIKE.has(effectiveStatus(r));
+}
+function rowNudgeDue(r: typeof salesFollowupsTable.$inferSelect): boolean {
+  const since = daysSince(r.sentAt);
+  return rowHasSent(r) && !hasReplied(r) && since != null && since >= NUDGE_AFTER_DAYS;
+}
+
+type ContextLite = {
+  enrichmentStatus: string | null;
+  tSheetUrl: string | null;
+  hasTSheetSummary: boolean;
+  hasDocsSummary: boolean;
+  hasGrowthDoc: boolean;
+  docCount: number;
+};
+
+function buildListPayload(
+  rows: (typeof salesFollowupsTable.$inferSelect)[],
+  hasCompletedColumn: boolean,
+  ctxByKey: Map<string, ContextLite> = new Map(),
+) {
   const items = rows
-    .map((r) => ({
-      key: r.clientKey,
-      startup: r.startup,
-      contact: r.contact,
-      email: r.email,
-      program: r.program,
-      stage: r.stage,
-      host: r.host,
-      cohost: r.cohost,
-      sessions: r.sessions,
-      sprintCompleted: r.sprintCompleted,
-      lastSprintDate: r.lastSprintDate,
-      daysSinceSprint: daysSince(r.lastSprintDate),
-      status: effectiveStatus(r),
-      replyState: r.replyState,
-      sentAt: r.sentAt,
-      lastContactAt: r.lastContactAt,
-      draftSubject: r.draftSubject,
-      draftBodyHtml: r.draftBodyHtml,
-      templateKey: r.templateKey,
-      skipped: r.skipped,
-      skipReason: r.skipReason,
-    }))
-    // Only show clients who've actually done a sprint (have a sprint date).
-    .filter((r) => r.lastSprintDate);
+    // Only surface companies engaged on/after the April-2026 cutoff (§3.1).
+    .filter((r) => withinEngagementCutoff(r.lastSprintDate))
+    .map((r) => {
+      const status = effectiveStatus(r);
+      const sent = SENT_LIKE.has(status);
+      const replied = hasReplied(r);
+      const awaitingReply = sent && !replied;
+      const sinceSent = daysSince(r.sentAt);
+      const nudgeDue = awaitingReply && sinceSent != null && sinceSent >= NUDGE_AFTER_DAYS;
+      const ctx = ctxByKey.get(r.clientKey);
+      return {
+        key: r.clientKey,
+        startup: r.startup,
+        contact: r.contact,
+        email: r.email,
+        program: r.program,
+        stage: r.stage,
+        host: r.host,
+        cohost: r.cohost,
+        sessions: r.sessions,
+        sprintCompleted: r.sprintCompleted,
+        lastSprintDate: r.lastSprintDate,
+        daysSinceSprint: daysSince(r.lastSprintDate),
+        status,
+        interest: r.interest,
+        interestSetAt: r.interestSetAt,
+        replyState: r.replyState,
+        sentAt: r.sentAt,
+        lastContactAt: r.lastContactAt,
+        draftSubject: r.draftSubject,
+        draftBodyHtml: r.draftBodyHtml,
+        templateKey: r.templateKey,
+        skipped: r.skipped,
+        skipReason: r.skipReason,
+        hasSent: sent,
+        awaitingReply,
+        nudgeDue,
+        // Enrichment / doc context (lightweight — full detail via /:key/context).
+        enrichmentStatus: ctx?.enrichmentStatus ?? null,
+        tSheetUrl: ctx?.tSheetUrl ?? null,
+        hasTSheetSummary: ctx?.hasTSheetSummary ?? false,
+        hasDocsSummary: ctx?.hasDocsSummary ?? false,
+        hasGrowthDoc: ctx?.hasGrowthDoc ?? false,
+        docCount: ctx?.docCount ?? 0,
+      };
+    });
 
   const now = items;
   const sentThisMonth = now.filter((r) => {
@@ -353,17 +427,25 @@ function buildListPayload(rows: (typeof salesFollowupsTable.$inferSelect)[], has
     const n = new Date();
     return d.getMonth() === n.getMonth() && d.getFullYear() === n.getFullYear();
   }).length;
-  const sentTotal = now.filter((r) => ["sent", "no_reply", "replied", "replied_interested", "replied_not_now"].includes(r.status)).length;
-  const replied = now.filter((r) => ["replied", "replied_interested", "replied_not_now"].includes(r.status)).length;
+  const sentTotal = now.filter((r) => r.hasSent).length;
+  const replied = now.filter((r) => REPLIED_LIKE.has(r.status)).length;
+  // Actionable = triaged interested/maybe (the new "should follow up" set).
+  const actionable = now.filter((r) => ACTIONABLE_INTEREST.has(r.interest ?? ""));
 
   const stats = {
     due: now.filter((r) => r.status === "due" && !r.skipped).length,
     completedSprints: now.filter((r) => r.sprintCompleted === true).length,
     sentThisMonth,
     replyRate: sentTotal ? Math.round((replied / sentTotal) * 100) : 0,
-    awaitingReply: now.filter((r) => r.status === "sent").length,
-    needsNudge: now.filter((r) => r.status === "no_reply").length,
+    awaitingReply: now.filter((r) => r.awaitingReply).length,
+    needsNudge: now.filter((r) => r.nudgeDue).length,
     skipped: now.filter((r) => r.skipped).length,
+    // Triage tallies for the new UX.
+    interested: now.filter((r) => r.interest === "interested").length,
+    maybe: now.filter((r) => r.interest === "maybe").length,
+    notNow: now.filter((r) => r.interest === "not_now").length,
+    untriaged: now.filter((r) => !r.interest).length,
+    actionable: actionable.length,
   };
 
   // Distinct cohorts (programs) present in the visible set, for the filter UI.
@@ -371,6 +453,31 @@ function buildListPayload(rows: (typeof salesFollowupsTable.$inferSelect)[], has
     .sort((a, b) => a.localeCompare(b));
 
   return { items, stats, hasCompletedColumn, cohorts };
+}
+
+/** Load a lightweight enrichment-context map for the given client keys. */
+async function contextLiteFor(keys: string[]): Promise<Map<string, ContextLite>> {
+  const map = new Map<string, ContextLite>();
+  if (keys.length === 0) return map;
+  const [ctxRows, docRows] = await Promise.all([
+    db.select().from(salesFollowupContextTable).where(inArray(salesFollowupContextTable.clientKey, keys)),
+    db.select({ clientKey: salesFollowupDocsTable.clientKey }).from(salesFollowupDocsTable).where(inArray(salesFollowupDocsTable.clientKey, keys)),
+  ]);
+  const docCounts = new Map<string, number>();
+  for (const d of docRows) docCounts.set(d.clientKey, (docCounts.get(d.clientKey) ?? 0) + 1);
+  for (const c of ctxRows) {
+    map.set(c.clientKey, {
+      enrichmentStatus: c.enrichmentStatus ?? null,
+      tSheetUrl: c.tSheetUrl ?? null,
+      hasTSheetSummary: Boolean(c.tSheetSummary && c.tSheetSummary.trim()),
+      hasDocsSummary: Boolean(c.docsSummary && c.docsSummary.trim()),
+      hasGrowthDoc: Boolean(c.growthDocxFileId || c.growthBrief),
+      docCount: docCounts.get(c.clientKey) ?? 0,
+    });
+  }
+  // Keys with docs but no context row yet.
+  for (const [k, n] of docCounts) if (!map.has(k)) map.set(k, { enrichmentStatus: null, tSheetUrl: null, hasTSheetSummary: false, hasDocsSummary: false, hasGrowthDoc: false, docCount: n });
+  return map;
 }
 
 // ─── Read-time scoping ──────────────────────────────────────────────────────
@@ -454,7 +561,9 @@ router.get("/sales/followups", async (req, res) => {
     // Scope to the caller (consultant → own hosted/co-hosted; oversight → all,
     // with an optional ?scope=mine), then apply any ?cohort= filter.
     const { rows: visible, scoped } = scopeRows(rows, auth, req.query);
-    res.json({ ...buildListPayload(visible, true), scoped, viewer: viewerInfo(auth) });
+    const inScope = visible.filter((r) => withinEngagementCutoff(r.lastSprintDate));
+    const ctx = await contextLiteFor(inScope.map((r) => r.clientKey));
+    res.json({ ...buildListPayload(visible, true, ctx), scoped, viewer: viewerInfo(auth), cutoff: SALES_ENGAGEMENT_CUTOFF });
   } catch (err) {
     req.log?.error?.({ err }, "GET followups failed");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load follow-ups" });
@@ -472,9 +581,10 @@ router.post("/sales/followups/refresh", async (req, res) => {
     lastBgSyncAt = Date.now();
     const all = await db.select().from(salesFollowupsTable);
     const { rows, scoped } = scopeRows(all, auth, req.query);
+    const ctx = await contextLiteFor(rows.filter((r) => withinEngagementCutoff(r.lastSprintDate)).map((r) => r.clientKey));
     res.json({
-      ...buildListPayload(rows, hasCompletedColumn), scoped, viewer: viewerInfo(auth),
-      synced, syncedAt: new Date().toISOString(),
+      ...buildListPayload(rows, hasCompletedColumn, ctx), scoped, viewer: viewerInfo(auth),
+      synced, syncedAt: new Date().toISOString(), cutoff: SALES_ENGAGEMENT_CUTOFF,
     });
   } catch (err) {
     req.log?.error?.({ err }, "refresh followups failed");
@@ -482,11 +592,13 @@ router.post("/sales/followups/refresh", async (req, res) => {
     try {
       const all = await db.select().from(salesFollowupsTable);
       const { rows, scoped } = scopeRows(all, auth, req.query);
+      const ctx = await contextLiteFor(rows.filter((r) => withinEngagementCutoff(r.lastSprintDate)).map((r) => r.clientKey));
       res.status(200).json({
-        ...buildListPayload(rows, true),
+        ...buildListPayload(rows, true, ctx),
         scoped, viewer: viewerInfo(auth),
         synced: 0,
         syncedAt: new Date().toISOString(),
+        cutoff: SALES_ENGAGEMENT_CUTOFF,
         warning: err instanceof Error ? err.message : "Sheet sync was slow; showing cached data.",
       });
     } catch {
@@ -499,7 +611,6 @@ router.post("/sales/followups/refresh", async (req, res) => {
 // Ops/admin only. Groups the WHOLE table by consultant (each company counts
 // under BOTH its host and its co-host), so Ops can see whether every consultant
 // has reached out to their companies. Optional ?cohort=<program> narrows it.
-const SENT_STATUSES = new Set(["sent", "no_reply", "replied", "replied_interested", "replied_not_now"]);
 
 router.get("/sales/followups/ops-progress", async (req, res) => {
   const auth = await requireSales(req, res); if (!auth) return;
@@ -507,7 +618,7 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
   try {
     const cohort = String(req.query?.cohort ?? "").trim().toLowerCase();
     const all = (await db.select().from(salesFollowupsTable))
-      .filter((r) => r.lastSprintDate)
+      .filter((r) => withinEngagementCutoff(r.lastSprintDate))
       .filter((r) => !cohort || (r.program ?? "").trim().toLowerCase() === cohort);
 
     // Reconcile each consultant name to a known user (by alias) for display.
@@ -519,10 +630,14 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
       for (const a of aliasesForUser(u)) if (!userByAlias.has(a)) userByAlias.set(a, { id: u.id, name: u.name, email: u.email });
     }
 
+    // "Expected to follow up" (the denominator) = companies triaged
+    // interested/maybe. `not_now` and untriaged are excluded (§3.6).
     type Grp = {
       host: string; matchedUser: { id: number; name: string; email: string } | null;
-      cohorts: Set<string>; companies: number; reached: number; pending: number;
-      due: number; sent: number; replied: number; drafted: number; skipped: number;
+      cohorts: Set<string>; companies: number;
+      interestedOrMaybe: number; sent: number; pending: number; nudgesDue: number;
+      replied: number; repliedInterested: number; repliedNotNow: number;
+      drafted: number; notNow: number; skipped: number;
     };
     const groups = new Map<string, Grp>();
     const bump = (name: string | null, r: typeof salesFollowupsTable.$inferSelect) => {
@@ -533,38 +648,56 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
       if (!g) {
         g = {
           host: clean, matchedUser: userByAlias.get(k) ?? null, cohorts: new Set(),
-          companies: 0, reached: 0, pending: 0, due: 0, sent: 0, replied: 0, drafted: 0, skipped: 0,
+          companies: 0, interestedOrMaybe: 0, sent: 0, pending: 0, nudgesDue: 0,
+          replied: 0, repliedInterested: 0, repliedNotNow: 0, drafted: 0, notNow: 0, skipped: 0,
         };
         groups.set(k, g);
       }
       const st = effectiveStatus(r);
-      const reached = SENT_STATUSES.has(st);
+      const actionable = ACTIONABLE_INTEREST.has(r.interest ?? "");
+      const sent = rowHasSent(r);
       g.companies += 1;
       if (r.program) g.cohorts.add(r.program.trim());
       if (r.skipped) g.skipped += 1;
-      if (reached) { g.reached += 1; g.sent += 1; }
-      if (["replied", "replied_interested", "replied_not_now"].includes(st)) g.replied += 1;
+      if (r.interest === "not_now") g.notNow += 1;
+      // Only interested/maybe count toward "should have sent".
+      if (actionable) {
+        g.interestedOrMaybe += 1;
+        if (sent) g.sent += 1; else g.pending += 1;
+        if (rowNudgeDue(r)) g.nudgesDue += 1;
+      }
+      if (REPLIED_LIKE.has(st)) g.replied += 1;
+      if (st === "replied_interested" || r.replyState === "interested") g.repliedInterested += 1;
+      if (st === "replied_not_now" || r.replyState === "not_now") g.repliedNotNow += 1;
       if (st === "draft") g.drafted += 1;
-      if (st === "due" && !r.skipped) { g.due += 1; g.pending += 1; }
     };
     for (const r of all) { bump(r.host, r); bump(r.cohost, r); }
 
     const consultants = [...groups.values()]
       .map((g) => {
-        const denom = g.reached + g.pending;
+        const replyRate = g.sent ? Math.round((g.replied / g.sent) * 100) : 0;
         return {
           host: g.host,
           matchedUser: g.matchedUser,
           cohorts: [...g.cohorts].sort((a, b) => a.localeCompare(b)),
           companies: g.companies,
-          reached: g.reached,
+          assigned: g.companies,
+          interestedOrMaybe: g.interestedOrMaybe,
+          // legacy aliases kept so the existing UI keeps rendering
+          reached: g.sent,
           pending: g.pending,
-          due: g.due,
+          due: g.pending,
           sent: g.sent,
+          nudgesDue: g.nudgesDue,
           replied: g.replied,
+          repliedInterested: g.repliedInterested,
+          repliedNotNow: g.repliedNotNow,
           drafted: g.drafted,
+          notNow: g.notNow,
           skipped: g.skipped,
-          completionPct: denom ? Math.round((g.reached / denom) * 100) : 100,
+          replyRate,
+          behind: replyRate < 30,
+          completionPct: g.interestedOrMaybe ? Math.round((g.sent / g.interestedOrMaybe) * 100) : 100,
         };
       })
       .sort((a, b) => b.pending - a.pending || a.completionPct - b.completionPct || a.host.localeCompare(b.host));
@@ -595,6 +728,195 @@ router.post("/sales/followups/:key/mark", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to update" });
+  }
+});
+
+// ─── Triage: interest (interested | maybe | not_now) ────────────────────────
+// The triage-first decision that gates Generate/Enrich/Send. Independent of the
+// legacy `skipped` gate. Allowed for the hosting consultant or any ops/admin.
+router.put("/sales/followups/:key/interest", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  const raw = req.body?.interest;
+  const interest = raw == null || raw === "" || raw === "none" ? null : String(raw);
+  if (interest != null && !INTEREST_STATES.includes(interest as any)) {
+    res.status(400).json({ error: "interest must be interested | maybe | not_now (or empty to clear)" }); return;
+  }
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found. Refresh the sheet and try again." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only triage companies you hosted or co-hosted." }); return; }
+    await db.update(salesFollowupsTable)
+      .set({ interest, interestSetAt: interest ? new Date() : null, updatedAt: new Date() })
+      .where(eq(salesFollowupsTable.id, row.id));
+    res.json({ ok: true, interest });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to update triage" });
+  }
+});
+
+// Full enrichment context + docs + growth brief for the drawer.
+router.get("/sales/followups/:key/context", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "Not your company." }); return; }
+    const [ctx] = await db.select().from(salesFollowupContextTable).where(eq(salesFollowupContextTable.clientKey, key)).limit(1);
+    const docs = await db.select().from(salesFollowupDocsTable).where(eq(salesFollowupDocsTable.clientKey, key)).orderBy(asc(salesFollowupDocsTable.id));
+    res.json({
+      interest: row.interest ?? null,
+      tSheetUrl: ctx?.tSheetUrl ?? null,
+      tSheetSummary: ctx?.tSheetSummary ?? null,
+      docsSummary: ctx?.docsSummary ?? null,
+      enrichmentStatus: ctx?.enrichmentStatus ?? "idle",
+      enrichmentError: ctx?.enrichmentError ?? null,
+      enrichedAt: ctx?.enrichedAt ?? null,
+      docs: docs.map((d) => ({ id: d.id, title: d.title, sourceType: d.sourceType, url: d.url, status: d.status, error: d.error })),
+      growth: ctx?.growthBrief
+        ? { brief: ctx.growthBrief, docxUrl: ctx.growthDocxUrl, pdfUrl: ctx.growthPdfUrl, generatedAt: ctx.growthGeneratedAt }
+        : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load context" });
+  }
+});
+
+// Enrichment: read the T-sheet + any submitted docs, summarise, persist (§3.3).
+// Multipart: `files` (uploads) + fields `tSheetUrl`, `docUrls` (JSON), `keepDocIds` (JSON).
+router.post("/sales/followups/:key/enrich", upload.array("files"), async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(String(req.params.key));
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found. Refresh the sheet and try again." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only analyse companies you hosted or co-hosted." }); return; }
+    if (!ACTIONABLE_INTEREST.has(row.interest ?? "")) {
+      res.status(400).json({ error: "Mark this company Interested or Maybe before analysing." }); return;
+    }
+    const parseArr = (v: unknown): string[] => {
+      if (Array.isArray(v)) return v.map(String);
+      if (typeof v !== "string" || !v.trim()) return [];
+      try { const a = JSON.parse(v); return Array.isArray(a) ? a.map(String) : [v]; } catch { return [v]; }
+    };
+    const docUrls = parseArr(req.body?.docUrls);
+    const keepDocIds = parseArr(req.body?.keepDocIds).map(Number).filter((n) => Number.isFinite(n));
+    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+    const uploads: UploadInput[] = files.map((f) => ({ filename: f.originalname, mimeType: f.mimetype, buffer: f.buffer }));
+    const tSheetUrl = req.body?.tSheetUrl != null ? String(req.body.tSheetUrl) : null;
+
+    const result = await enrichFollowup({
+      userId: auth.userId, clientKey: key, startup: row.startup,
+      tSheetUrl, docUrls, uploads, keepDocIds,
+    });
+    res.json(result);
+  } catch (err) {
+    req.log?.error?.({ err }, "enrich failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Enrichment failed" });
+  }
+});
+
+// AI draft generation (§3.4). Does NOT send and does NOT persist — the client
+// shows the result in the editable drawer.
+router.post("/sales/followups/:key/generate", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found. Refresh the sheet and try again." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only draft for companies you hosted or co-hosted." }); return; }
+    if (!ACTIONABLE_INTEREST.has(row.interest ?? "")) {
+      res.status(400).json({ error: "Mark this company Interested or Maybe before generating a draft." }); return;
+    }
+    const templateBody = String(req.body?.templateBody ?? "");
+    const templateIntent = String(req.body?.templateIntent ?? req.body?.templateKey ?? "").trim() || null;
+
+    const [ctx] = await db.select().from(salesFollowupContextTable).where(eq(salesFollowupContextTable.clientKey, key)).limit(1);
+    const email = await generateEmail("followup", {
+      companyName: row.startup,
+      founderName: row.contact ?? row.startup,
+      cohort: row.program,
+      vision: null, sprintHost: row.host, coHost: row.cohost,
+      sprintDay: null, sprintDate: row.lastSprintDate, sprintTime: null,
+      keyStrengths: null, gaps: null, direction: null, actionableSteps: null,
+      mentorRecommendation: null, marketAccess: null, thinkingSheetUrl: null,
+      interest: row.interest,
+      templateIntent,
+      tSheetSummary: ctx?.tSheetSummary ?? null,
+      docsSummary: ctx?.docsSummary ?? null,
+    }, templateBody);
+    res.json({ subject: email.subject, bodyHtml: sanitizeHtml(email.body) });
+  } catch (err) {
+    req.log?.error?.({ err }, "generate draft failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Draft generation failed" });
+  }
+});
+
+// Growth Prospects document (§11). Generate the brief (LLM) OR re-render from an
+// edited brief (no LLM), render DOCX (guaranteed) + PDF (best-effort), store in
+// Drive, persist. Guard: interest ∈ {interested, maybe} and T-sheet enriched.
+router.post("/sales/followups/:key/growth-prospects", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found. Refresh the sheet and try again." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only generate documents for companies you hosted or co-hosted." }); return; }
+    if (!ACTIONABLE_INTEREST.has(row.interest ?? "")) {
+      res.status(400).json({ error: "Mark this company Interested or Maybe first." }); return;
+    }
+    const [ctx] = await db.select().from(salesFollowupContextTable).where(eq(salesFollowupContextTable.clientKey, key)).limit(1);
+    const editedBrief = req.body?.brief && typeof req.body.brief === "object" ? (req.body.brief as GrowthProspectsBrief) : null;
+    if (!editedBrief && !(ctx?.tSheetSummary && ctx.tSheetSummary.trim())) {
+      res.status(400).json({ error: "Analyse the T-sheet first — the Growth Prospects document is built from it." }); return;
+    }
+
+    const brief: GrowthProspectsBrief = editedBrief ?? await generateGrowthProspectsBrief({
+      companyName: row.startup,
+      founderName: row.contact ?? row.startup,
+      cohort: row.program,
+      sprintHost: row.host,
+      tSheetSummary: ctx?.tSheetSummary ?? null,
+      docsSummary: ctx?.docsSummary ?? null,
+    });
+
+    // DOCX is the guaranteed deliverable — render it first.
+    const docxBuf = await renderGrowthProspectsDocx(brief);
+    const stem = growthProspectsFileStem(brief.companyName || row.startup);
+
+    const drive = await driveFor(auth.userId).catch(() => null);
+    if (!drive) { res.status(400).json({ error: "Connect Google Drive in Settings → Google Connections to store the document." }); return; }
+    const folderId = await ensureSalesFolder(drive, row.startup);
+    if (ctx?.growthDocxFileId) await deleteDriveFile(drive, ctx.growthDocxFileId);
+    if (ctx?.growthPdfFileId) await deleteDriveFile(drive, ctx.growthPdfFileId);
+
+    const docxRef = await uploadToDrive(drive, folderId, `${stem}.docx`, DOCX_MIME, docxBuf);
+
+    // PDF is best-effort — never let a PDF failure block the DOCX or the email.
+    let pdfUrl: string | null = null, pdfFileId: string | null = null, pdfError: string | null = null;
+    try {
+      const pdfBuf = await renderGrowthProspectsPdf(brief);
+      const pdfRef = await uploadToDrive(drive, folderId, `${stem}.pdf`, "application/pdf", pdfBuf);
+      pdfUrl = pdfRef.webViewLink; pdfFileId = pdfRef.fileId;
+    } catch (e) {
+      pdfError = e instanceof Error ? e.message : "PDF rendering unavailable";
+      req.log?.warn?.({ err: e }, "growth prospects PDF failed (non-fatal)");
+    }
+
+    const now = new Date();
+    const vals = {
+      clientKey: key, growthBrief: brief,
+      growthDocxUrl: docxRef.webViewLink, growthDocxFileId: docxRef.fileId,
+      growthPdfUrl: pdfUrl, growthPdfFileId: pdfFileId, growthGeneratedAt: now, updatedAt: now,
+    };
+    if (ctx) await db.update(salesFollowupContextTable).set(vals).where(eq(salesFollowupContextTable.clientKey, key));
+    else await db.insert(salesFollowupContextTable).values(vals);
+
+    res.json({ brief, docxUrl: docxRef.webViewLink, pdfUrl, pdfError, needsValidation: brief.needsValidation });
+  } catch (err) {
+    req.log?.error?.({ err }, "growth-prospects failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build the Growth Prospects document" });
   }
 });
 
@@ -678,6 +1000,13 @@ router.post("/sales/followups/:key/send", async (req, res) => {
   try {
     const [row] = await db.select().from(salesFollowupsTable).where(eq(salesFollowupsTable.clientKey, key)).limit(1);
     if (!row) { res.status(404).json({ error: "Client not found. Refresh the sheet and try again." }); return; }
+    // Only interested/maybe companies are ever sent to (§3.2). `not_now` never.
+    if (row.interest === "not_now") {
+      res.status(400).json({ error: "This company is marked Not now — it won't be contacted. Change the triage to send." }); return;
+    }
+    if (!ACTIONABLE_INTEREST.has(row.interest ?? "")) {
+      res.status(400).json({ error: "Mark this company Interested or Maybe before sending." }); return;
+    }
     const to = toOverride || row.email;
     if (!to || !/.+@.+\..+/.test(to)) {
       res.status(400).json({ error: "No valid email on file for this client. Add one in the sheet (Email column) and refresh." });
@@ -688,7 +1017,30 @@ router.post("/sales/followups/:key/send", async (req, res) => {
     if (!client) { res.status(400).json({ error: "Connect Gmail in Settings → Google Connections first." }); return; }
     const gmail = google.gmail({ version: "v1", auth: client });
 
-    const raw = buildRawHtmlMessage({ to: [to], subject, html: bodyHtml });
+    // Optionally attach the Growth Prospects document (DOCX always, PDF if it
+    // was produced). A missing/failed PDF never blocks the send.
+    const attachments: MailAttachment[] = [];
+    if (req.body?.attachGrowthProspects) {
+      try {
+        const [ctx] = await db.select().from(salesFollowupContextTable).where(eq(salesFollowupContextTable.clientKey, key)).limit(1);
+        if (ctx?.growthDocxFileId || ctx?.growthPdfFileId) {
+          const drive = await driveFor(userId).catch(() => null);
+          const stem = growthProspectsFileStem(row.startup);
+          if (drive && ctx.growthDocxFileId) {
+            const buf = await downloadDriveFile(drive, ctx.growthDocxFileId);
+            attachments.push({ filename: `${stem}.docx`, mimeType: DOCX_MIME, content: buf });
+          }
+          if (drive && ctx.growthPdfFileId) {
+            try {
+              const buf = await downloadDriveFile(drive, ctx.growthPdfFileId);
+              attachments.push({ filename: `${stem}.pdf`, mimeType: "application/pdf", content: buf });
+            } catch (e) { req.log?.warn?.({ err: e }, "growth prospects PDF attach skipped (non-fatal)"); }
+          }
+        }
+      } catch (e) { req.log?.warn?.({ err: e }, "growth prospects attachment skipped (non-fatal)"); }
+    }
+
+    const raw = buildRawHtmlMessage({ to: [to], subject, html: bodyHtml, attachments });
     const sendResult = await gmail.users.messages.send({ userId: "me", requestBody: { raw } });
     const messageId = sendResult.data.id ?? null;
     const threadId = sendResult.data.threadId ?? null;
@@ -934,30 +1286,68 @@ function htmlToPlain(html: string): string {
     .trim();
 }
 
-function buildRawHtmlMessage(opts: { to: string[]; subject: string; html: string }): string {
-  const boundary = `tsfu_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+type MailAttachment = { filename: string; mimeType: string; content: Buffer };
+
+/** Base64-encode attachment bytes into 76-char MIME lines. */
+function base64Lines(buf: Buffer): string {
+  return buf.toString("base64").replace(/(.{76})/g, "$1\r\n");
+}
+
+function buildRawHtmlMessage(opts: { to: string[]; subject: string; html: string; attachments?: MailAttachment[] }): string {
+  const stamp = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const altBoundary = `tsfu_alt_${stamp}`;
   const plain = htmlToPlain(opts.html);
   const wrapped = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#1f2937;">${opts.html}</div>`;
-  const raw = [
-    `To: ${opts.to.join(", ")}`,
-    `Subject: ${opts.subject}`,
-    "MIME-Version: 1.0",
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+
+  const altPart = [
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
     "",
-    `--${boundary}`,
+    `--${altBoundary}`,
     "Content-Type: text/plain; charset=utf-8",
     "Content-Transfer-Encoding: 8bit",
     "",
     plain,
     "",
-    `--${boundary}`,
+    `--${altBoundary}`,
     "Content-Type: text/html; charset=utf-8",
     "Content-Transfer-Encoding: 8bit",
     "",
     wrapped,
     "",
-    `--${boundary}--`,
+    `--${altBoundary}--`,
   ].join("\r\n");
+
+  const attachments = opts.attachments ?? [];
+  let raw: string;
+  if (attachments.length === 0) {
+    raw = [`To: ${opts.to.join(", ")}`, `Subject: ${opts.subject}`, "MIME-Version: 1.0", altPart].join("\r\n");
+  } else {
+    const mixed = `tsfu_mix_${stamp}`;
+    const parts: string[] = [
+      `To: ${opts.to.join(", ")}`,
+      `Subject: ${opts.subject}`,
+      "MIME-Version: 1.0",
+      `Content-Type: multipart/mixed; boundary="${mixed}"`,
+      "",
+      `--${mixed}`,
+      altPart,
+      "",
+    ];
+    for (const a of attachments) {
+      const safeName = a.filename.replace(/[\r\n"]/g, "");
+      parts.push(
+        `--${mixed}`,
+        `Content-Type: ${a.mimeType}; name="${safeName}"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: attachment; filename="${safeName}"`,
+        "",
+        base64Lines(a.content),
+        "",
+      );
+    }
+    parts.push(`--${mixed}--`);
+    raw = parts.join("\r\n");
+  }
   return Buffer.from(raw).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
