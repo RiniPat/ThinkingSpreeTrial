@@ -54,6 +54,17 @@ export const salesFollowupsTable = pgTable("sales_followups", {
   replyDetectedAt: timestamp("reply_detected_at", { withTimezone: true }),
   replyIsManual: boolean("reply_is_manual").notNull().default(false),
 
+  // Pipeline stage sends (migration 026). 1st outreach = `sentAt`. A client
+  // response at any stage breaks the chain (see responseState).
+  nudgeSentAt: timestamp("nudge_sent_at", { withTimezone: true }),
+  toffeeSentAt: timestamp("toffee_sent_at", { withTimezone: true }),
+
+  // Client-response tracking (migration 026). Richer than replyState; the
+  // consultant sets it (AI-assisted later). `responseNote` = free-text remark.
+  responseState: text("response_state"), // interested | quotation_sent | no_reply_after_quotation | other
+  responseNote: text("response_note"),
+  responseSetAt: timestamp("response_set_at", { withTimezone: true }),
+
   // "Willing to contact?" gate (migration 023). When true the consultant has
   // decided NOT to reach out; Operations tracking excludes it from the
   // "should have sent" count. Independent of `status`.
@@ -78,9 +89,19 @@ export type ReplyState = (typeof REPLY_STATES)[number];
 export const TEMPLATE_KEYS = ["checkin", "next_sprint", "nudge"] as const;
 export type TemplateKey = (typeof TEMPLATE_KEYS)[number];
 
-/** Triage states (migration 024). Only interested/maybe are actionable. */
+/** Shortlisting states (migration 024). Only interested/maybe are actionable.
+ *  UI labels: interested→Shortlisted, maybe→Maybe, not_now→Not shortlisted.
+ *  DB values kept stable to avoid a data migration. */
 export const INTEREST_STATES = ["interested", "maybe", "not_now"] as const;
 export type InterestState = (typeof INTEREST_STATES)[number];
+
+/** Client-response states (migration 026). Pipeline stage progression. */
+export const RESPONSE_STATES = ["interested", "quotation_sent", "no_reply_after_quotation", "other"] as const;
+export type ResponseState = (typeof RESPONSE_STATES)[number];
+
+/** Retargeting pipeline stages (7 days per step; consultant sends each). */
+export const PIPELINE_STAGES = ["outreach", "nudge", "toffee"] as const;
+export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 
 export const insertSalesFollowupSchema = createInsertSchema(salesFollowupsTable).omit({
   id: true, createdAt: true, updatedAt: true,

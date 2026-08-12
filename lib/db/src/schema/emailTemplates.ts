@@ -19,6 +19,7 @@ export const emailTemplatesTable = pgTable("email_templates", {
   name: text("name").notNull(),
   subject: text("subject"),              // used by 'followup'
   sortOrder: integer("sort_order").notNull().default(0),
+  pipelineStage: text("pipeline_stage"), // followup only: 'outreach' | 'nudge' | 'toffee' | NULL (migration 027)
   body: text("body").notNull(),
   createdBy: integer("created_by"),      // user id, for attribution only
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

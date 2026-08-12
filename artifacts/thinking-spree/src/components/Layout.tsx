@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import {
   LayoutDashboard, Rocket, Flag, Users, Shield, Compass, Mail, Radar,
-  LogOut, Menu, X, Bell, CircleHelp,
+  LogOut, Menu, X, Bell, CircleHelp, ChevronDown,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -24,35 +24,47 @@ const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
  *   Sales        (Leads · LinkedIn · Proposals)
  *   Admin        (Import · Roles · Team · Reset)
  */
-type NavItem = {
+type Leaf = {
   href: string;
   label: string;
-  icon: React.ElementType;
+  icon?: React.ElementType;
   badge?: string;
-  adminOnly?: boolean;
-  needsSales?: boolean;
-  needsInboxCrm?: boolean;
-  // extra path prefixes that should keep this item highlighted
-  match?: string[];
+  disabled?: boolean;          // shown but not navigable (e.g. under maintenance)
+  match?: string[];            // extra path prefixes that keep it highlighted
 };
+type NavEntry =
+  | { kind: "leaf"; adminOnly?: boolean; needsSales?: boolean } & Leaf
+  | { kind: "group"; label: string; icon: React.ElementType; children: Leaf[]; adminOnly?: boolean; needsSales?: boolean };
 
-const navItems: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/pre-sprint", label: "Pre-Sprint", icon: Rocket },
-  { href: "/emails", label: "Emails", icon: Mail },
-  { href: "/research", label: "Research", icon: Compass },
-  { href: "/competitive-mapping", label: "Competitive Mapping", icon: Radar },
+// Nested IA: top topics with sub-pages tucked inside collapsible groups.
+const navTree: NavEntry[] = [
+  { kind: "leaf", href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   {
-    href: "/post-sprint", label: "Post-Sprint", icon: Flag,
-    match: ["/summary", "/builder", "/reports/outcomes", "/sprint-tracking"],
+    kind: "group", label: "Sprint", icon: Rocket, children: [
+      { href: "/pre-sprint", label: "Pre-Sprint" },
+      { href: "/emails", label: "Emails", icon: Mail },
+      { href: "/post-sprint", label: "Post-Sprint", match: ["/summary", "/builder", "/reports/outcomes", "/sprint-tracking"] },
+    ],
   },
-  { href: "/sales", label: "Sales", icon: Users, needsSales: true, match: ["/sales"] },
-  { href: "/admin", label: "Admin", icon: Shield, adminOnly: true, match: ["/admin/"] },
+  {
+    kind: "group", label: "Research", icon: Compass, children: [
+      { href: "/research", label: "Inspiration Journey" },
+      { href: "/competitive-mapping", label: "Competitive Mapping", icon: Radar },
+    ],
+  },
+  {
+    kind: "group", label: "Sales", icon: Users, needsSales: true, children: [
+      { href: "/sales", label: "Retargeting", match: ["/sales"] },
+      { href: "/cold-outreach", label: "Cold Outreach", disabled: true, badge: "Soon" },
+    ],
+  },
+  { kind: "leaf", href: "/admin", label: "Admin", icon: Shield, adminOnly: true, match: ["/admin/"] },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
   const logoutMutation = useLogout();
   const { data: user } = useGetMe();
@@ -86,17 +98,49 @@ export function Layout({ children }: { children: React.ReactNode }) {
     const isAdmin = perms?.role === "admin" || (user as any)?.isAdmin;
     const canSales = perms?.canAccessSales ?? false;
     const canInboxCrm = perms?.canAccessInboxCrm ?? false;
-    const visible = navItems.filter((item) => {
-      if (item.adminOnly && !isAdmin) return false;
-      if (item.needsSales && !canSales) return false;
-      if (item.needsInboxCrm && !canInboxCrm) return false;
-      return true;
-    });
+    void canInboxCrm;
+    const gate = (e: { adminOnly?: boolean; needsSales?: boolean }) =>
+      (!e.adminOnly || isAdmin) && (!e.needsSales || canSales);
+    const visible = navTree.filter(gate);
 
-    const isActive = (item: NavItem) => {
-      if (location === item.href) return true;
-      if (item.href !== "/dashboard" && location.startsWith(item.href)) return true;
-      return (item.match ?? []).some((m) => location === m || location.startsWith(m));
+    const pathActive = (l: { href: string; match?: string[] }) => {
+      if (location === l.href) return true;
+      if (l.href !== "/dashboard" && location.startsWith(l.href)) return true;
+      return (l.match ?? []).some((m) => location === m || location.startsWith(m));
+    };
+
+    const renderLeaf = (l: Leaf, nested: boolean) => {
+      const active = !l.disabled && pathActive(l);
+      const Icon = l.icon;
+      const inner = (
+        <a
+          onClick={() => !l.disabled && setMobileOpen(false)}
+          className={cn(
+            "group flex items-center gap-3 rounded-md text-sm font-medium transition-all duration-150",
+            nested ? "py-2 pl-3 pr-3" : "px-3 py-2.5",
+            l.disabled
+              ? "cursor-not-allowed text-sidebar-foreground/35"
+              : active
+                ? "bg-white/[0.11] text-white shadow-sm ring-1 ring-white/10"
+                : "text-sidebar-foreground/72 hover:bg-white/[0.07] hover:text-white",
+          )}
+        >
+          {Icon ? (
+            <span className={cn("flex h-7 w-7 items-center justify-center rounded-md transition-colors", active ? "bg-white/10 text-white" : "bg-white/[0.04] text-sidebar-foreground/65 group-hover:text-white")}>
+              <Icon size={15} />
+            </span>
+          ) : (
+            <span className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: active ? "var(--gold)" : "rgba(255,255,255,0.28)" }} />
+          )}
+          <span className="flex-1 truncate">{l.label}</span>
+          {l.badge && (
+            <span className="rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ background: "var(--gold)", color: "hsl(222 38% 15%)" }}>{l.badge}</span>
+          )}
+          {active && !l.badge && <span className="ml-auto h-1.5 w-1.5 rounded-full" style={{ background: "var(--gold)" }} />}
+        </a>
+      );
+      if (l.disabled) return <div key={l.href} title="Under maintenance — coming soon">{inner}</div>;
+      return <Link key={l.href} href={l.href}>{inner}</Link>;
     };
 
     return (
@@ -122,41 +166,34 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-5">
           <div className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-sidebar-foreground/45">
-            Sprint lifecycle
+            Workspace
           </div>
-          {visible.map((item) => {
-            const { href, label, icon: Icon, badge } = item;
-            const active = isActive(item);
+          {visible.map((e) => {
+            if (e.kind === "leaf") return renderLeaf(e, false);
+            const GIcon = e.icon;
+            const anyChildActive = e.children.some((c) => !c.disabled && pathActive(c));
+            const open = (openGroups[e.label] ?? true) || anyChildActive;
             return (
-              <Link key={href} href={href}>
-                <a
-                  onClick={() => setMobileOpen(false)}
+              <div key={e.label}>
+                <button
+                  onClick={() => setOpenGroups((s) => ({ ...s, [e.label]: !(s[e.label] ?? true) }))}
                   className={cn(
-                    "group flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-all duration-150",
-                    active
-                      ? "bg-white/[0.11] text-white shadow-sm ring-1 ring-white/10"
-                      : "text-sidebar-foreground/72 hover:bg-white/[0.07] hover:text-white",
+                    "group flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors",
+                    anyChildActive ? "text-white" : "text-sidebar-foreground/72 hover:bg-white/[0.07] hover:text-white",
                   )}
                 >
-                  <span
-                    className={cn(
-                      "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
-                      active ? "bg-white/10 text-white" : "bg-white/[0.04] text-sidebar-foreground/65 group-hover:text-white",
-                    )}
-                  >
-                    <Icon size={15} />
+                  <span className={cn("flex h-7 w-7 items-center justify-center rounded-md transition-colors", anyChildActive ? "bg-white/10 text-white" : "bg-white/[0.04] text-sidebar-foreground/65 group-hover:text-white")}>
+                    <GIcon size={15} />
                   </span>
-                  <span className="flex-1 truncate">{label}</span>
-                  {badge && (
-                    <span className="rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ background: "var(--gold)", color: "hsl(222 38% 15%)" }}>
-                      {badge}
-                    </span>
-                  )}
-                  {active && !badge && (
-                    <span className="ml-auto h-1.5 w-1.5 rounded-full" style={{ background: "var(--gold)" }} />
-                  )}
-                </a>
-              </Link>
+                  <span className="flex-1 truncate text-left">{e.label}</span>
+                  <ChevronDown size={14} className={cn("shrink-0 transition-transform", open ? "" : "-rotate-90")} />
+                </button>
+                {open && (
+                  <div className="mb-1 mt-0.5 space-y-0.5 border-l border-white/10 pl-3">
+                    {e.children.map((c) => renderLeaf(c, true))}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>

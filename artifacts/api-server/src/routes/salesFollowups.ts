@@ -23,6 +23,7 @@ import {
   db, salesFollowupsTable, emailTemplatesTable, usersTable, makeClientKey,
   canViewSalesOps, isConsultantScoped,
   salesFollowupContextTable, salesFollowupDocsTable, INTEREST_STATES,
+  RESPONSE_STATES, PIPELINE_STAGES,
 } from "@workspace/db";
 import { eq, inArray, and, asc } from "drizzle-orm";
 import { google } from "googleapis";
@@ -358,6 +359,43 @@ function rowNudgeDue(r: typeof salesFollowupsTable.$inferSelect): boolean {
   return rowHasSent(r) && !hasReplied(r) && since != null && since >= NUDGE_AFTER_DAYS;
 }
 
+/** True once the consultant has logged a client response (breaks the chain). */
+function hasResponse(r: typeof salesFollowupsTable.$inferSelect): boolean {
+  return Boolean(r.responseState) || hasReplied(r);
+}
+
+/**
+ * Retargeting pipeline stage for a SENT row (§ pipeline). 7 days per step; a
+ * client response at any stage breaks the chain into `replied`.
+ *   outreach_sent → (7d) nudge_due → nudge_sent → (7d) toffee_due
+ *   → toffee_sent → (7d) dead ;  replied at any point.
+ */
+function pipelineStageOf(r: typeof salesFollowupsTable.$inferSelect): {
+  stage: string; label: string; dueNext: boolean;
+} {
+  if (hasResponse(r)) return { stage: "replied", label: "Replied", dueNext: false };
+  const d = (t: any) => daysSince(t);
+  if (r.toffeeSentAt) {
+    const since = d(r.toffeeSentAt);
+    return since != null && since >= NUDGE_AFTER_DAYS
+      ? { stage: "dead", label: "Dead lead", dueNext: false }
+      : { stage: "toffee_sent", label: "Reminder (Toffee) sent", dueNext: false };
+  }
+  if (r.nudgeSentAt) {
+    const since = d(r.nudgeSentAt);
+    return since != null && since >= NUDGE_AFTER_DAYS
+      ? { stage: "toffee_due", label: "Toffee reminder due", dueNext: true }
+      : { stage: "nudge_sent", label: "Nudge sent", dueNext: false };
+  }
+  if (r.sentAt) {
+    const since = d(r.sentAt);
+    return since != null && since >= NUDGE_AFTER_DAYS
+      ? { stage: "nudge_due", label: "Nudge due", dueNext: true }
+      : { stage: "outreach_sent", label: "1st outreach done", dueNext: false };
+  }
+  return { stage: "not_sent", label: "Not sent", dueNext: false };
+}
+
 type ContextLite = {
   enrichmentStatus: string | null;
   tSheetUrl: string | null;
@@ -410,6 +448,13 @@ function buildListPayload(
         hasSent: sent,
         awaitingReply,
         nudgeDue,
+        // Pipeline + response tracking.
+        responseState: r.responseState,
+        responseNote: r.responseNote,
+        nudgeSentAt: r.nudgeSentAt,
+        toffeeSentAt: r.toffeeSentAt,
+        pipelineStage: pipelineStageOf(r).stage,
+        pipelineStageLabel: pipelineStageOf(r).label,
         // Enrichment / doc context (lightweight — full detail via /:key/context).
         enrichmentStatus: ctx?.enrichmentStatus ?? null,
         tSheetUrl: ctx?.tSheetUrl ?? null,
@@ -637,7 +682,7 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
       cohorts: Set<string>; companies: number;
       interestedOrMaybe: number; sent: number; pending: number; nudgesDue: number;
       replied: number; repliedInterested: number; repliedNotNow: number;
-      drafted: number; notNow: number; skipped: number;
+      drafted: number; notNow: number; skipped: number; lastSentAt: Date | null;
     };
     const groups = new Map<string, Grp>();
     const bump = (name: string | null, r: typeof salesFollowupsTable.$inferSelect) => {
@@ -649,7 +694,7 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
         g = {
           host: clean, matchedUser: userByAlias.get(k) ?? null, cohorts: new Set(),
           companies: 0, interestedOrMaybe: 0, sent: 0, pending: 0, nudgesDue: 0,
-          replied: 0, repliedInterested: 0, repliedNotNow: 0, drafted: 0, notNow: 0, skipped: 0,
+          replied: 0, repliedInterested: 0, repliedNotNow: 0, drafted: 0, notNow: 0, skipped: 0, lastSentAt: null,
         };
         groups.set(k, g);
       }
@@ -666,6 +711,7 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
         if (sent) g.sent += 1; else g.pending += 1;
         if (rowNudgeDue(r)) g.nudgesDue += 1;
       }
+      if (sent && r.sentAt) { const t = new Date(r.sentAt); if (!g.lastSentAt || t > g.lastSentAt) g.lastSentAt = t; }
       if (REPLIED_LIKE.has(st)) g.replied += 1;
       if (st === "replied_interested" || r.replyState === "interested") g.repliedInterested += 1;
       if (st === "replied_not_now" || r.replyState === "not_now") g.repliedNotNow += 1;
@@ -695,6 +741,7 @@ router.get("/sales/followups/ops-progress", async (req, res) => {
           drafted: g.drafted,
           notNow: g.notNow,
           skipped: g.skipped,
+          lastSentAt: g.lastSentAt ? g.lastSentAt.toISOString() : null,
           replyRate,
           behind: replyRate < 30,
           completionPct: g.interestedOrMaybe ? Math.round((g.sent / g.interestedOrMaybe) * 100) : 100,
@@ -920,6 +967,69 @@ router.post("/sales/followups/:key/growth-prospects", async (req, res) => {
   }
 });
 
+// ─── Client-response tracking (pipeline) ────────────────────────────────────
+// Richer than the reply mark: interested | quotation_sent |
+// no_reply_after_quotation | other, plus a free-text remark. Logging a response
+// breaks the pipeline chain. Consultant-set now (AI-assisted later).
+router.put("/sales/followups/:key/response", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  const raw = req.body?.state;
+  const state = raw == null || raw === "" || raw === "none" ? null : String(raw);
+  if (state != null && !(RESPONSE_STATES as readonly string[]).includes(state)) {
+    res.status(400).json({ error: "state must be interested | quotation_sent | no_reply_after_quotation | other (or empty)" }); return;
+  }
+  const note = req.body?.note != null ? (String(req.body.note).trim().slice(0, 2000) || null) : undefined;
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "You can only update companies you hosted or co-hosted." }); return; }
+    const patch: any = { responseState: state, responseSetAt: state ? new Date() : null, updatedAt: new Date() };
+    if (note !== undefined) patch.responseNote = note;
+    if (state) {
+      // A logged response = the chain is broken. Mark it detected so reply-scan
+      // and the reply-rate insights count it, and mirror to the legacy state.
+      patch.replyDetectedAt = row.replyDetectedAt ?? new Date();
+      patch.replyIsManual = true;
+      if (state === "interested") patch.replyState = "interested";
+      else if (state === "no_reply_after_quotation") patch.replyState = "no_reply";
+    }
+    await db.update(salesFollowupsTable).set(patch).where(eq(salesFollowupsTable.id, row.id));
+    res.json({ ok: true, state, note: note ?? row.responseNote ?? null });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to update response" });
+  }
+});
+
+// ─── Pipeline: this consultant's sent companies, by stage ───────────────────
+// Shows ONLY companies the caller reached out to from their own email account
+// (ownerId == caller). Optional ?cohort= narrows it.
+router.get("/sales/followups/pipeline", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  try {
+    const cohort = String(req.query?.cohort ?? "").trim().toLowerCase();
+    const all = await db.select().from(salesFollowupsTable);
+    const ownSent = all.filter((r) => r.ownerId === auth.userId && r.sentAt && withinEngagementCutoff(r.lastSprintDate));
+    const rows = cohort ? ownSent.filter((r) => (r.program ?? "").trim().toLowerCase() === cohort) : ownSent;
+    const items = rows.map((r) => {
+      const st = pipelineStageOf(r);
+      const last = r.toffeeSentAt ?? r.nudgeSentAt ?? r.sentAt;
+      return {
+        key: r.clientKey, startup: r.startup, contact: r.contact, email: r.email, program: r.program,
+        stage: st.stage, stageLabel: st.label, dueNext: st.dueNext,
+        sentAt: r.sentAt, nudgeSentAt: r.nudgeSentAt, toffeeSentAt: r.toffeeSentAt,
+        responseState: r.responseState, responseNote: r.responseNote,
+        lastActivityAt: last, daysSinceLast: daysSince(last),
+      };
+    });
+    const cohorts = [...new Set(ownSent.map((r) => (r.program ?? "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    res.json({ items, cohorts });
+  } catch (err) {
+    req.log?.error?.({ err }, "pipeline failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load pipeline" });
+  }
+});
+
 // ─── "Not targeting" gate (the PRD willing-to decision) ─────────────────────
 // A consultant decides they won't reach out to a company; Ops tracking then
 // excludes it from the "should have sent" count. Allowed for the hosting
@@ -993,6 +1103,9 @@ router.post("/sales/followups/:key/send", async (req, res) => {
   // Which template this send used, so we can measure template performance
   // (replies per template). Falls back to whatever was stored at draft time.
   const templateKey = String(req.body?.templateKey ?? "").trim() || null;
+  // Which pipeline stage this send is (outreach | nudge | toffee).
+  const stageRaw = String(req.body?.stage ?? "outreach").trim();
+  const stage = (PIPELINE_STAGES as readonly string[]).includes(stageRaw) ? stageRaw : "outreach";
 
   if (!subject) { res.status(400).json({ error: "Subject is required." }); return; }
   if (!bodyHtml) { res.status(400).json({ error: "The email body is empty." }); return; }
@@ -1056,6 +1169,11 @@ router.post("/sales/followups/:key/send", async (req, res) => {
       draftBodyHtml: bodyHtml,
       // Record the template used (keep any existing one if none supplied).
       ...(templateKey ? { templateKey } : {}),
+      // Stamp the pipeline stage sent (1st outreach uses sentAt above).
+      ...(stage === "nudge" ? { nudgeSentAt: new Date() } : {}),
+      ...(stage === "toffee" ? { toffeeSentAt: new Date() } : {}),
+      // A fresh outreach restarts the chain — clear later-stage stamps.
+      ...(stage === "outreach" ? { nudgeSentAt: null, toffeeSentAt: null } : {}),
       // clear any stale reply state from a previous cycle
       replyState: null,
       replyDetectedAt: null,
@@ -1176,18 +1294,31 @@ router.get("/sales/followup-templates", async (req, res) => {
   }
 });
 
+// Shared templates are edited by Ops/Admin only (everyone edits their own
+// sign-off/signature via /me/followup-profile).
+function requireTemplateEditor(auth: SalesAuth, res: any): boolean {
+  if (!canViewSalesOps(auth.role)) {
+    res.status(403).json({ error: "Only Operations and Admin can edit shared templates." });
+    return false;
+  }
+  return true;
+}
+const FOLLOWUP_STAGES = new Set(["outreach", "nudge", "toffee"]);
+
 router.post("/sales/followup-templates", async (req, res) => {
   const auth = await requireSales(req, res); if (!auth) return; const userId = auth.userId;
+  if (!requireTemplateEditor(auth, res)) return;
   const name = String(req.body?.name ?? "").trim();
   const subject = String(req.body?.subject ?? "").trim();
   const body = sanitizeHtml(String(req.body?.body ?? ""));
   const sortOrder = Number.isFinite(Number(req.body?.sortOrder)) ? Number(req.body?.sortOrder) : 0;
+  const pipelineStage = FOLLOWUP_STAGES.has(String(req.body?.pipelineStage)) ? String(req.body.pipelineStage) : null;
   if (!name) { res.status(400).json({ error: "Name is required." }); return; }
   if (!body) { res.status(400).json({ error: "Body is required." }); return; }
   try {
     const [row] = await db.insert(emailTemplatesTable).values({
       kind: FOLLOWUP_KIND, name, body, createdBy: userId,
-      ...( { subject, sortOrder } as any ),
+      ...( { subject, sortOrder, pipelineStage } as any ),
     }).returning();
     res.json({ ok: true, template: row });
   } catch (err) {
@@ -1196,13 +1327,15 @@ router.post("/sales/followup-templates", async (req, res) => {
 });
 
 router.put("/sales/followup-templates/:id", async (req, res) => {
-  const auth = await requireSales(req, res); if (!auth) return; const userId = auth.userId;
+  const auth = await requireSales(req, res); if (!auth) return;
+  if (!requireTemplateEditor(auth, res)) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   const patch: any = { updatedAt: new Date() };
   if (req.body?.name != null) patch.name = String(req.body.name).trim();
   if (req.body?.subject != null) patch.subject = String(req.body.subject).trim();
   if (req.body?.body != null) patch.body = sanitizeHtml(String(req.body.body));
+  if (req.body?.pipelineStage != null) patch.pipelineStage = FOLLOWUP_STAGES.has(String(req.body.pipelineStage)) ? String(req.body.pipelineStage) : null;
   if (req.body?.sortOrder != null && Number.isFinite(Number(req.body.sortOrder))) patch.sortOrder = Number(req.body.sortOrder);
   try {
     await db.update(emailTemplatesTable).set(patch)
@@ -1214,7 +1347,8 @@ router.put("/sales/followup-templates/:id", async (req, res) => {
 });
 
 router.delete("/sales/followup-templates/:id", async (req, res) => {
-  const auth = await requireSales(req, res); if (!auth) return; const userId = auth.userId;
+  const auth = await requireSales(req, res); if (!auth) return;
+  if (!requireTemplateEditor(auth, res)) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {

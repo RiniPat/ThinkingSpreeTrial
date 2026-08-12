@@ -44,6 +44,12 @@ type Followup = {
   hasSent: boolean;
   awaitingReply: boolean;
   nudgeDue: boolean;
+  responseState: string | null;
+  responseNote: string | null;
+  nudgeSentAt: string | null;
+  toffeeSentAt: string | null;
+  pipelineStage: string;
+  pipelineStageLabel: string;
   enrichmentStatus: string | null;
   tSheetUrl: string | null;
   hasTSheetSummary: boolean;
@@ -57,19 +63,46 @@ type Stats = {
   interested: number; maybe: number; notNow: number; untriaged: number; actionable: number;
 };
 
-// ─── Triage (interest) metadata ──────────────────────────────────────────────
+// ─── Shortlisting (interest) metadata ────────────────────────────────────────
+// DB values stay interested/maybe/not_now; UI labels are the shortlisting terms.
 const INTEREST_META: Record<string, { label: string; bg: string; fg: string }> = {
-  interested: { label: "Interested",   bg: "#E1F5EE", fg: "#0F6E56" },
-  maybe:      { label: "Maybe",         bg: "hsl(36 70% 92%)", fg: "#8A5A00" },
-  not_now:    { label: "Not now",       bg: "#EEF1F5", fg: "#4A5566" },
+  interested: { label: "Shortlisted",     bg: "#E1F5EE", fg: "#0F6E56" },
+  maybe:      { label: "Maybe",           bg: "hsl(36 70% 92%)", fg: "#8A5A00" },
+  not_now:    { label: "Not shortlisted", bg: "#EEF1F5", fg: "#4A5566" },
 };
 const ACTIONABLE_INTEREST = new Set(["interested", "maybe"]);
+
+// ─── Client-response metadata (pipeline) ─────────────────────────────────────
+const RESPONSE_META: Record<string, { label: string; bg: string; fg: string }> = {
+  interested:                { label: "Interested",              bg: "#E1F5EE", fg: "#0F6E56" },
+  quotation_sent:            { label: "Quotation sent",          bg: "#E6F1FB", fg: "#0C447C" },
+  no_reply_after_quotation:  { label: "No reply after quotation",bg: "#FBEEE1", fg: "#A85A1F" },
+  other:                     { label: "Other",                   bg: "#EFEAFB", fg: "#5B3FA8" },
+};
+const RESPONSE_OPTIONS = ["interested", "quotation_sent", "no_reply_after_quotation", "other"] as const;
+
+// Pipeline stage a send belongs to (drives which template set + timestamp).
+const STAGE_OPTIONS: { key: string; label: string }[] = [
+  { key: "outreach", label: "1st outreach" },
+  { key: "nudge", label: "Nudge" },
+  { key: "toffee", label: "Reminder (Toffee)" },
+];
+const STAGE_SEND_LABEL: Record<string, string> = { outreach: "1st outreach", nudge: "Nudge", toffee: "Reminder (Toffee)" };
+
+// Pipeline stage lanes (send-driven; 7 days per step).
+const PIPELINE_LANES: { key: string; label: string; match: (s: string) => boolean }[] = [
+  { key: "outreach", label: "1st outreach done", match: (s) => s === "outreach_sent" || s === "nudge_due" },
+  { key: "nudge",    label: "Nudge sent",        match: (s) => s === "nudge_sent" || s === "toffee_due" },
+  { key: "toffee",   label: "Reminder (Toffee) sent", match: (s) => s === "toffee_sent" },
+  { key: "dead",     label: "Dead lead",         match: (s) => s === "dead" },
+  { key: "replied",  label: "Replied",           match: (s) => s === "replied" },
+];
 type Viewer = { name: string | null; role: string; canViewOps: boolean };
 type ListPayload = {
   items: Followup[]; stats: Stats; hasCompletedColumn: boolean; syncedAt?: string;
   cohorts?: string[]; scoped?: boolean; viewer?: Viewer;
 };
-type DbTemplate = { id: number; name: string; subject: string | null; body: string; sortOrder: number };
+type DbTemplate = { id: number; name: string; subject: string | null; body: string; sortOrder: number; pipelineStage?: string | null };
 
 // ─── Chip metadata ──────────────────────────────────────────────────────────
 const STATUS_META: Record<string, { label: string; bg: string; fg: string }> = {
@@ -243,9 +276,9 @@ function TriageCell({ f, compact }: { f: Followup; compact?: boolean }) {
     onError: (e: any) => toast({ title: "Couldn't update triage", description: String(e?.message ?? e), variant: "destructive" }),
   });
   const opts: { key: string; label: string; icon: React.ReactNode; fg: string; bg: string }[] = [
-    { key: "interested", label: "Interested", icon: <ThumbsUp size={12} />, fg: "#0F6E56", bg: "#E1F5EE" },
+    { key: "interested", label: "Shortlisted", icon: <ThumbsUp size={12} />, fg: "#0F6E56", bg: "#E1F5EE" },
     { key: "maybe", label: "Maybe", icon: <MinusCircle size={12} />, fg: "#8A5A00", bg: "hsl(36 70% 92%)" },
-    { key: "not_now", label: "Not now", icon: <ThumbsDown size={12} />, fg: "#4A5566", bg: "#EEF1F5" },
+    { key: "not_now", label: "Not shortlisted", icon: <ThumbsDown size={12} />, fg: "#4A5566", bg: "#EEF1F5" },
   ];
   return (
     <div className={`inline-flex overflow-hidden rounded-md border border-border ${compact ? "" : ""}`} onClick={(e) => e.stopPropagation()}>
@@ -381,10 +414,10 @@ function TemplatePerformance({ items, templates }: { items: Followup[]; template
 
 const FILTERS = [
   { key: "all", label: "All" },
-  { key: "untriaged", label: "To triage" },
-  { key: "interested", label: "Interested" },
+  { key: "untriaged", label: "To shortlist" },
+  { key: "interested", label: "Shortlisted" },
   { key: "maybe", label: "Maybe" },
-  { key: "not_now", label: "Not now" },
+  { key: "not_now", label: "Not shortlisted" },
   { key: "sent", label: "Sent" },
   { key: "nudge", label: "Needs nudge" },
 ] as const;
@@ -602,8 +635,8 @@ export default function SalesInboxPage() {
             two-column band so the top of the page reads evenly, not cluttered. */}
         <div className="mt-6 grid gap-4 lg:grid-cols-[1.15fr_1fr]">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <StatCard label="To triage" value={stats?.untriaged ?? "—"} accent hint="not yet marked" />
-            <StatCard label="Interested / Maybe" value={stats ? stats.interested + stats.maybe : "—"} hint="to follow up" />
+            <StatCard label="To shortlist" value={stats?.untriaged ?? "—"} accent hint="not yet marked" />
+            <StatCard label="Shortlisted / Maybe" value={stats ? stats.interested + stats.maybe : "—"} hint="to follow up" />
             <StatCard label="Awaiting reply" value={stats?.awaitingReply ?? "—"} />
             <StatCard label="Needs nudge" value={stats?.needsNudge ?? "—"} hint="7+ days, no reply" />
             <StatCard label="Sent this month" value={stats?.sentThisMonth ?? "—"} />
@@ -617,9 +650,8 @@ export default function SalesInboxPage() {
           {/* Underline tabs */}
           <div className="flex items-center gap-6 border-b border-border px-5">
             {([
-              { label: "Pipeline", key: "pipeline" as const },
               { label: "Follow-ups", key: "followups" as const },
-              { label: "Clients", key: "clients" as const },
+              { label: "Pipeline", key: "pipeline" as const },
               { label: "Templates", key: "templates" as const },
               ...(perms?.canViewSalesOps ? [{ label: "Ops tracking", key: "ops" as const }] : []),
             ]).map((t) => {
@@ -639,11 +671,9 @@ export default function SalesInboxPage() {
           </div>
 
           {tab === "templates" ? (
-            <TemplatesPanel profile={profile} />
-          ) : tab === "clients" ? (
-            <ClientsPanel items={items} loading={isLoading} />
+            <TemplatesPanel profile={profile} canEdit={perms?.canViewSalesOps ?? false} />
           ) : tab === "pipeline" ? (
-            <PipelinePanel items={items} onOpen={(k) => setOpenKey(k)} />
+            <PipelinePanel onOpen={(k) => setOpenKey(k)} />
           ) : tab === "ops" ? (
             <OpsPanel cohort={cohort} cohorts={cohorts} onCohort={setCohort} />
           ) : (
@@ -744,7 +774,7 @@ export default function SalesInboxPage() {
                 <thead>
                   <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
                     <th className="px-5 py-2.5 font-medium">Client</th>
-                    <th className="px-3 py-2.5 font-medium">Triage</th>
+                    <th className="px-3 py-2.5 font-medium">Shortlist</th>
                     <th className="px-3 py-2.5 font-medium">Status</th>
                     <th className="px-3 py-2.5 font-medium">Program</th>
                     <th className="px-3 py-2.5 font-medium">Stage</th>
@@ -896,9 +926,15 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
   const [to, setTo] = useState<string>(row.email ?? "");
   const [confirmSend, setConfirmSend] = useState(false);
 
-  // Triage (local mirror for instant gating; server is source of truth).
+  // Shortlisting (local mirror for instant gating; server is source of truth).
   const [interest, setInterest] = useState<string | null>(row.interest ?? null);
   const actionable = ACTIONABLE_INTEREST.has(interest ?? "");
+
+  // Pipeline stage this send is (outreach | nudge | toffee).
+  const [stage, setStage] = useState<string>("outreach");
+  // Client-response tracking.
+  const [respState, setRespState] = useState<string>(row.responseState ?? "");
+  const [respNote, setRespNote] = useState<string>(row.responseNote ?? "");
 
   // Enrichment state.
   const [tSheetUrl, setTSheetUrl] = useState<string>(row.tSheetUrl ?? "");
@@ -938,7 +974,10 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
   const picks: DbTemplate[] = templates.length
     ? templates
-    : TEMPLATES.map((t, i) => ({ id: -(i + 1), name: t.name, subject: t.subject, body: t.body, sortOrder: i }));
+    : TEMPLATES.map((t, i) => ({ id: -(i + 1), name: t.name, subject: t.subject, body: t.body, sortOrder: i, pipelineStage: "outreach" }));
+  // Templates for the selected pipeline stage (fall back to all if none tagged).
+  const stagePicks = picks.filter((t) => (t.pipelineStage ?? "outreach") === stage);
+  const effectivePicks = stagePicks.length ? stagePicks : picks;
 
   useEffect(() => {
     if (editorRef.current) {
@@ -1044,22 +1083,23 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
     mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/send`), {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        subject, bodyHtml: readBody(), to,
+        subject, bodyHtml: readBody(), to, stage,
         templateKey: tmplId != null ? String(tmplId) : row.templateKey ?? null,
         attachGrowthProspects: attachGrowth && Boolean(growth),
       }),
     }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Follow-up sent", description: `Emailed ${to}.` }); onClose(); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); qc.invalidateQueries({ queryKey: ["/api/sales/followups/pipeline"] }); toast({ title: `${STAGE_SEND_LABEL[stage] ?? "Follow-up"} sent`, description: `Emailed ${to}.` }); onClose(); },
     onError: (e: any) => toast({ title: "Send failed", description: String(e?.message ?? e), variant: "destructive" }),
   });
 
-  const mark = useMutation({
-    mutationFn: (m: string) => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/mark`), {
-      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mark: m }),
+  // Log the client's response (breaks the pipeline chain).
+  const saveResponse = useMutation({
+    mutationFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/response`), {
+      method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state: respState || null, note: respNote.trim() || null }),
     }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); toast({ title: "Reply logged" }); },
-    onError: (e: any) => toast({ title: "Couldn't update", description: String(e?.message ?? e), variant: "destructive" }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/sales/followups"] }); qc.invalidateQueries({ queryKey: ["/api/sales/followups/pipeline"] }); toast({ title: "Response saved" }); },
+    onError: (e: any) => toast({ title: "Couldn't save response", description: String(e?.message ?? e), variant: "destructive" }),
   });
 
   function attemptSend() {
@@ -1143,7 +1183,7 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
             </div>
             {!actionable && (
               <p className="mt-2 text-[12px] text-muted-foreground">
-                Mark <strong>Interested</strong> or <strong>Maybe</strong> to analyse, draft and send. <strong>Not now</strong> keeps them off the actionable list.
+                Mark <strong>Shortlisted</strong> or <strong>Maybe</strong> to analyse, draft and send. <strong>Not shortlisted</strong> keeps them off the actionable list.
               </p>
             )}
           </div>
@@ -1230,8 +1270,24 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
             <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-[10px] text-background">3</span> Draft the email
             </div>
+            {/* Pipeline stage — which step of the chain this send is. */}
+            <div className="mb-2">
+              <div className="mb-1 text-[11px] text-muted-foreground">Pipeline stage (7 days apart, sent manually)</div>
+              <div className="inline-flex overflow-hidden rounded-md border border-border">
+                {STAGE_OPTIONS.map((s) => {
+                  const active = stage === s.key;
+                  return (
+                    <button key={s.key} onClick={() => { setStage(s.key); setTmplId(null); }}
+                      className="px-3 py-1.5 text-xs font-medium transition-colors"
+                      style={active ? { background: "hsl(222 47% 20%)", color: "white" } : { color: "var(--muted-foreground)" }}>
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             <div className="grid gap-2 sm:grid-cols-3">
-              {picks.map((t) => {
+              {effectivePicks.map((t) => {
                 const active = tmplId === t.id;
                 return (
                   <button key={t.id} onClick={() => applyTemplate(t)}
@@ -1353,11 +1409,29 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
         {/* Footer */}
         <div className="border-t border-border px-6 py-4">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Log reply</span>
-            <button onClick={() => mark.mutate("interested")} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent" style={{ color: "#0F6E56" }}><ThumbsUp size={12} /> Interested</button>
-            <button onClick={() => mark.mutate("not_now")} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"><MinusCircle size={12} /> Not now</button>
-            <button onClick={() => mark.mutate("no_reply")} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent" style={{ color: "#A85A1F" }}><ThumbsDown size={12} /> No reply</button>
+          {/* Client response — breaks the pipeline chain. Consultant-set. */}
+          <div className="mb-3">
+            <div className="mb-1.5 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Client response</span>
+              {RESPONSE_OPTIONS.map((k) => {
+                const m = RESPONSE_META[k]; const active = respState === k;
+                return (
+                  <button key={k} onClick={() => setRespState(active ? "" : k)}
+                    className="rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors"
+                    style={active ? { background: m.bg, color: m.fg, borderColor: "transparent" } : { borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2">
+              <input value={respNote} onChange={(e) => setRespNote(e.target.value)} placeholder="Optional remark (e.g. asked to revisit in Q3)"
+                className="flex-1 rounded-md border border-border bg-card px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-ring/40" />
+              <button onClick={() => saveResponse.mutate()} disabled={saveResponse.isPending}
+                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-border px-2.5 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60">
+                {saveResponse.isPending ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save response
+              </button>
+            </div>
           </div>
           <div className="flex items-center justify-end gap-2">
             <button onClick={() => saveDraft.mutate()} disabled={saveDraft.isPending}
@@ -1409,7 +1483,8 @@ const RichTextField = forwardRef<RichHandle, { initialHtml?: string; minHeight?:
 );
 
 // ─── Templates manager (Templates tab) ──────────────────────────────────────
-function TemplatesPanel({ profile }: { profile?: Profile }) {
+const STAGE_TAG_LABEL: Record<string, string> = { outreach: "1st outreach", nudge: "Nudge", toffee: "Reminder (Toffee)" };
+function TemplatesPanel({ profile, canEdit }: { profile?: Profile; canEdit: boolean }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<{ items: DbTemplate[] }>({
@@ -1428,11 +1503,15 @@ function TemplatesPanel({ profile }: { profile?: Profile }) {
   return (
     <div className="p-5">
       <SignoffCard profile={profile} />
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">Shared library. Edits are live for the whole team — no deploy needed. Use <code className="rounded bg-muted px-1">[Square Bracket]</code> placeholders; the app fills [First Name], [Company], [Name], [Title], [Phone], [Calendar link] and highlights the rest.</p>
-        <button onClick={() => setEditing("new")} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-white" style={{ background: "hsl(222 47% 20%)" }}>
-          <Plus size={15} /> New template
-        </button>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          Shared library{canEdit ? " — edits are live for the whole team, no deploy needed" : " (read-only — Ops/Admin edit the shared copy)"}. Use <code className="rounded bg-muted px-1">[Square Bracket]</code> placeholders; the app fills [First Name], [Company], [Name], [Title], [Phone], [Calendar link] and highlights the rest.
+        </p>
+        {canEdit && (
+          <button onClick={() => setEditing("new")} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-white" style={{ background: "hsl(222 47% 20%)" }}>
+            <Plus size={15} /> New template
+          </button>
+        )}
       </div>
       {isLoading ? (
         <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><Loader2 size={16} className="animate-spin" /> Loading…</div>
@@ -1443,13 +1522,18 @@ function TemplatesPanel({ profile }: { profile?: Profile }) {
           {items.map((t) => (
             <div key={t.id} className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
               <div className="min-w-0">
-                <div className="text-sm font-medium">{t.name}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">{t.name}</span>
+                  {t.pipelineStage && <span className="rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: "#EEF2F7", color: "#17335C" }}>{STAGE_TAG_LABEL[t.pipelineStage] ?? t.pipelineStage}</span>}
+                </div>
                 <div className="truncate text-xs text-muted-foreground">{t.subject || "—"}</div>
               </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <button onClick={() => setEditing(t)} className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent">Edit</button>
-                <button onClick={() => { if (confirm(`Delete “${t.name}”?`)) del.mutate(t.id); }} className="rounded-md border border-border px-2.5 py-1.5 text-xs text-destructive hover:bg-accent">Delete</button>
-              </div>
+              {canEdit && (
+                <div className="flex shrink-0 items-center gap-1">
+                  <button onClick={() => setEditing(t)} className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent">Edit</button>
+                  <button onClick={() => { if (confirm(`Delete “${t.name}”?`)) del.mutate(t.id); }} className="rounded-md border border-border px-2.5 py-1.5 text-xs text-destructive hover:bg-accent">Delete</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1465,10 +1549,11 @@ function TemplateEditor({ template, onClose }: { template: DbTemplate | null; on
   const bodyRef = useRef<RichHandle>(null);
   const [name, setName] = useState(template?.name ?? "");
   const [subject, setSubject] = useState(template?.subject ?? "");
+  const [pipelineStage, setPipelineStage] = useState<string>(template?.pipelineStage ?? "outreach");
 
   const save = useMutation({
     mutationFn: () => {
-      const payload = { name, subject, body: bodyRef.current?.getHtml() ?? "" };
+      const payload = { name, subject, pipelineStage, body: bodyRef.current?.getHtml() ?? "" };
       return template
         ? customFetch(api(`/sales/followup-templates/${template.id}`), { method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
         : customFetch(api("/sales/followup-templates"), { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, sortOrder: 99 }) });
@@ -1490,10 +1575,20 @@ function TemplateEditor({ template, onClose }: { template: DbTemplate | null; on
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Name</span>
             <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
           </label>
-          <label className="block text-sm">
-            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Subject</span>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
-          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Subject</span>
+              <input value={subject} onChange={(e) => setSubject(e.target.value)} className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Pipeline stage</span>
+              <select value={pipelineStage} onChange={(e) => setPipelineStage(e.target.value)} className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40">
+                <option value="outreach">1st outreach</option>
+                <option value="nudge">Nudge</option>
+                <option value="toffee">Reminder (Toffee)</option>
+              </select>
+            </label>
+          </div>
           <div>
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Body</span>
             <RichTextField ref={bodyRef} initialHtml={template?.body ?? "<p>Hi [First Name],</p><p></p>"} minHeight={260} />
@@ -1759,47 +1854,88 @@ function ClientsPanel({ items, loading }: { items: Followup[]; loading: boolean 
 }
 
 // ─── Pipeline board (Pipeline tab) ──────────────────────────────────────────
-// A follow-up pipeline built from status — not a separate leads CRM. Columns
-// track a client from Due → Sent → Awaiting → Replied outcomes.
-const PIPELINE_COLS: { key: string; label: string; match: (s: string) => boolean }[] = [
-  { key: "due", label: "Due", match: (s) => s === "due" },
-  { key: "sent", label: "Sent", match: (s) => s === "sent" },
-  { key: "nudge", label: "Needs nudge", match: (s) => s === "no_reply" },
-  { key: "replied", label: "Replied", match: (s) => s === "replied" },
-  { key: "interested", label: "Interested", match: (s) => s === "replied_interested" },
-  { key: "not_now", label: "Not now", match: (s) => s === "replied_not_now" },
-];
-function PipelinePanel({ items, onOpen }: { items: Followup[]; onOpen: (key: string) => void }) {
+// Tracks the emails THIS consultant sent (their own Gmail), stage by stage:
+// 1st outreach → Nudge → Reminder (Toffee) → Dead lead, plus a Replied lane.
+// A client response at any stage moves the card to Replied. Cohort filter on top.
+type PipelineItem = {
+  key: string; startup: string; contact: string | null; email: string | null; program: string | null;
+  stage: string; stageLabel: string; dueNext: boolean;
+  sentAt: string | null; nudgeSentAt: string | null; toffeeSentAt: string | null;
+  responseState: string | null; responseNote: string | null;
+  lastActivityAt: string | null; daysSinceLast: number | null;
+};
+function PipelinePanel({ onOpen }: { onOpen: (key: string) => void }) {
+  const [cohort, setCohort] = useState<string | null>(null);
+  const cohortParam = cohort ? `?cohort=${encodeURIComponent(cohort)}` : "";
+  const { data, isLoading, isError, error } = useQuery<{ items: PipelineItem[]; cohorts: string[] }>({
+    queryKey: ["/api/sales/followups/pipeline", cohort],
+    queryFn: () => customFetch(api(`/sales/followups/pipeline${cohortParam}`), { credentials: "include" }),
+    staleTime: 20_000,
+  });
+  const items = data?.items ?? [];
+  const cohorts = data?.cohorts ?? [];
+
   return (
-    <div className="overflow-x-auto p-5">
-      <div className="flex min-w-[900px] gap-3">
-        {PIPELINE_COLS.map((col) => {
-          const cards = items.filter((f) => col.match(f.status));
-          return (
-            <div key={col.key} className="flex-1">
-              <div className="mb-2 flex items-center justify-between px-1">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{col.label}</span>
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{cards.length}</span>
-              </div>
-              <div className="space-y-2">
-                {cards.map((f) => {
-                  const pm = programMeta(f.program);
-                  return (
-                    <button key={f.key} onClick={() => onOpen(f.key)} className="block w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:bg-accent/40">
-                      <div className="truncate text-sm font-medium">{f.startup}</div>
-                      <div className="truncate text-xs text-muted-foreground">{f.contact ?? "—"}</div>
-                      <div className="mt-1.5 flex items-center gap-1.5">
-                        {f.program && <span className="rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: pm.bg, color: pm.fg }}>{f.program}</span>}
-                        {f.daysSinceSprint != null && <span className="text-[10px] text-muted-foreground">{f.daysSinceSprint}d</span>}
-                      </div>
-                    </button>
-                  );
-                })}
-                {cards.length === 0 && <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">—</div>}
-              </div>
-            </div>
-          );
-        })}
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3">
+        <div className="text-sm text-muted-foreground">
+          {items.length} compan{items.length === 1 ? "y" : "ies"} you emailed{cohort ? ` · ${cohort}` : ""}
+        </div>
+        {cohorts.length > 0 && (
+          <select value={cohort ?? ""} onChange={(e) => setCohort(e.target.value || null)}
+            className="rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground outline-none focus:ring-2 focus:ring-ring/40"
+            title="Filter by cohort / program">
+            <option value="">All cohorts</option>
+            {cohorts.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 size={16} className="animate-spin" /> Loading pipeline…</div>
+      ) : isError ? (
+        <div className="px-5 py-12 text-center text-sm text-destructive">{String((error as any)?.message ?? "Failed to load.")}</div>
+      ) : items.length === 0 ? (
+        <div className="px-5 py-14 text-center text-sm text-muted-foreground">No sent follow-ups yet{cohort ? ` in ${cohort}` : ""}. Send from the Follow-ups tab and they’ll appear here.</div>
+      ) : (
+        <div className="overflow-x-auto p-5">
+          <div className="flex min-w-[1100px] gap-3">
+            {PIPELINE_LANES.map((lane) => {
+              const cards = items.filter((f) => lane.match(f.stage));
+              return (
+                <div key={lane.key} className="flex-1">
+                  <div className="mb-2 flex items-center justify-between px-1">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{lane.label}</span>
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{cards.length}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {cards.map((f) => {
+                      const pm = programMeta(f.program);
+                      const resp = f.responseState ? RESPONSE_META[f.responseState] : null;
+                      return (
+                        <button key={f.key} onClick={() => onOpen(f.key)} className="block w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:bg-accent/40">
+                          <div className="truncate text-sm font-medium">{f.startup}</div>
+                          <div className="truncate text-xs text-muted-foreground">{f.contact ?? "—"}</div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            {f.program && <span className="rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: pm.bg, color: pm.fg }}>{f.program}</span>}
+                            {resp && <span className="rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: resp.bg, color: resp.fg }}>{resp.label}</span>}
+                            {f.dueNext && !resp && <span className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: "#FBEEE1", color: "#A85A1F" }}><Clock size={9} /> next due</span>}
+                          </div>
+                          {f.responseNote && <div className="mt-1 truncate text-[11px] text-muted-foreground" title={f.responseNote}>“{f.responseNote}”</div>}
+                          {f.daysSinceLast != null && <div className="mt-1 text-[10px] text-muted-foreground">{f.daysSinceLast}d since last</div>}
+                        </button>
+                      );
+                    })}
+                    {cards.length === 0 && <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">—</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <div className="border-t border-border px-5 py-3 text-[11px] text-muted-foreground">
+        Only companies you emailed from your own account. Each stage is 7 days apart; a client reply breaks the chain into <strong>Replied</strong>.
       </div>
     </div>
   );
@@ -1817,6 +1953,7 @@ type OpsConsultant = {
   sent: number; nudgesDue: number; replied: number;
   repliedInterested: number; repliedNotNow: number;
   drafted: number; notNow: number; skipped: number;
+  lastSentAt: string | null;
   replyRate: number; behind: boolean; completionPct: number;
 };
 function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohorts: string[]; onCohort: (c: string | null) => void }) {
@@ -1826,8 +1963,11 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
     queryFn: () => customFetch(api(`/sales/followups/ops-progress${cohortParam}`), { credentials: "include" }),
     staleTime: 30_000,
   });
-  const list = data?.consultants ?? [];
+  const rawList = data?.consultants ?? [];
   const opts = data?.cohorts?.length ? data.cohorts : cohorts;
+  const [pick, setPick] = useState<string>("");
+  const names = useMemo(() => rawList.map((c) => c.matchedUser?.name ?? c.host), [rawList]);
+  const list = pick ? rawList.filter((c) => (c.matchedUser?.name ?? c.host) === pick) : rawList;
   const pendingConsultants = list.filter((c) => c.pending > 0).length;
   const totalPending = list.reduce((n, c) => n + c.pending, 0);
 
@@ -1842,16 +1982,23 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
             · {list.length} consultant{list.length === 1 ? "" : "s"} · {pendingConsultants} with {totalPending} pending
           </span>
         </div>
-        {opts.length > 0 && (
-          <select
-            value={cohort ?? ""}
-            onChange={(e) => onCohort(e.target.value || null)}
-            className="rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground outline-none focus:ring-2 focus:ring-ring/40"
-          >
-            <option value="">All cohorts</option>
-            {opts.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        )}
+        <div className="flex items-center gap-2">
+          {names.length > 0 && (
+            <select value={pick} onChange={(e) => setPick(e.target.value)}
+              className="rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground outline-none focus:ring-2 focus:ring-ring/40"
+              title="Filter by consultant">
+              <option value="">All consultants</option>
+              {names.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          )}
+          {opts.length > 0 && (
+            <select value={cohort ?? ""} onChange={(e) => onCohort(e.target.value || null)}
+              className="rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground outline-none focus:ring-2 focus:ring-ring/40">
+              <option value="">All cohorts</option>
+              {opts.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
+        </div>
       </div>
 
       {isLoading ? (
@@ -1873,6 +2020,7 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
                 <th className="px-3 py-2.5 font-medium">Replied</th>
                 <th className="px-3 py-2.5 font-medium">Reply outcomes</th>
                 <th className="px-3 py-2.5 font-medium">Reply rate</th>
+                <th className="px-3 py-2.5 font-medium">Last sent</th>
               </tr>
             </thead>
             <tbody>
@@ -1913,6 +2061,7 @@ function OpsPanel({ cohort, cohorts, onCohort }: { cohort: string | null; cohort
                         {done && <CheckCircle2 size={13} style={{ color: "var(--success)" }} />}
                       </div>
                     </td>
+                    <td className="px-3 py-3 text-muted-foreground">{c.lastSentAt ? fmtDate(c.lastSentAt) : "—"}</td>
                   </tr>
                 );
               })}
