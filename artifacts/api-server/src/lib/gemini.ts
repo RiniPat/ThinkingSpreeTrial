@@ -164,6 +164,35 @@ function buildFollowupPrompt(ctx: EmailContext, templateOverride?: string | null
     ? `\nGROUNDING CONTEXT — use these to make the email specific and warm. Reference the ACTUAL work; do NOT fabricate details beyond what is here:\n${groundingBlock}\n`
     : "\nGROUNDING CONTEXT: none beyond the sprint facts above. Do NOT invent meeting specifics — keep the email grounded in the template intent and the sprint facts only.\n";
 
+  // "AI Email" template → fully AI-written (no fixed scaffold). Warm, human,
+  // grounded in the T-sheet + transcript, engineered to NOT read like AI.
+  const isAiEmail = (ctx.templateIntent ?? "").trim().toLowerCase() === "ai email";
+  if (isAiEmail) {
+    return `You are a senior consultant at Thinking Spree, a venture-focused strategy firm in India, writing a personal SALES FOLLOW-UP email to a founder you have already run T-Sprint sessions with. Write the WHOLE email yourself — there is no template. The single goal is to make this founder want to write back.
+
+CONTEXT — fields from the company's record:
+${ctxLines}
+${grounding}
+WRITE LIKE A REAL PERSON, NOT AN AI. This is the most important instruction.
+- Open with something specific and genuine from the grounding context — a decision, a blocker, a number, a moment from the sessions. Never open with "I hope this email finds you well", "I hope you're doing well", or any generic pleasantry.
+- Vary sentence length. Use a short sentence now and then. Contractions are good (we're, you've, I'd). Warm, direct, first person.
+- Sound like one human writing to another they respect — not a firm broadcasting. Reference the real work; show you remember them.
+- Make ONE clear, low-friction ask (a short catch-up / a reply on how things are going). No hard sell, no menu of options, no pricing.
+- Keep it genuinely short: 90–160 words, 3–4 short paragraphs. A founder should read it in well under a minute.
+
+BANNED — never use these AI tells or clichés: "I hope this email finds you well", "I wanted to reach out", "leverage", "synergy", "circle back", "touch base", "excited to", "in today's fast-paced world", "delve", "unlock", "game-changing", "at the end of the day", em-dash-stuffed cadence, or any emoji.
+
+STRICT RULES
+1. Output JSON ONLY — no markdown fences, no preamble. Shape: { "subject": "...", "body": "..." }
+2. "body" is HTML using ONLY these tags: <p>, <br>, <strong>, <em>, <u>, <ul>, <ol>, <li>, <a>. No headings, no inline styles, no other tags. Prefer plain <p> paragraphs; avoid lists unless they truly help.
+3. Ground every specific claim in the CONTEXT above. Never invent a metric, event, date, price, or fact. If you have little to work with, stay warm and general rather than fabricating.
+4. Do NOT include any price, fee, or ₹ amount — the consultant handles commercials separately.
+5. Address the founder by first name in the greeting (their first name is in the context). End with EXACTLY this sign-off block so the app can fill it: <p>Warm regards,<br>[Name]<br>[Title], Thinking Spree<br>[Phone] | [Calendar link]</p> — keep those four [square-bracket] tokens exactly as written; do not replace or delete them.
+6. Subject line: short, specific, human, and mentions the company by name. Not "Following up" or "Checking in".
+
+Return only the JSON object.`;
+  }
+
   return `You are a senior consultant at Thinking Spree, a venture-focused strategy firm in India. You are drafting a warm SALES FOLLOW-UP email to a founder we have already run T-Sprint sessions with. The goal is to earn a reply.
 
 CONTEXT — fields from the company's record:
@@ -556,7 +585,7 @@ export async function generateGrowthProspectsBrief(input: {
     generationConfig: { temperature: 0.5, responseMimeType: "application/json" },
   });
 
-  const system = `You are a senior growth strategist at Thinking Spree, a startup-consulting firm in India. You are writing the content for a ONE-PAGE, client-facing "Growth Prospects" document that will be attached to a follow-up email to a founder we have already run T-Sprint sessions with. The goal of this document is to earn a reply: remind the founder of the value we created, show momentum with real figures from their sprint sheet, and make the next 3-6 months feel concrete, credible, and worth a conversation.
+  const system = `You are a senior growth strategist at Thinking Spree, a startup-consulting firm in India. You are writing the content for a ONE-PAGE, client-facing "Growth Prospects" document that will be attached to a follow-up email to a founder we have already run T-Sprint sessions with. The goal of this document is to earn a reply and make the founder WANT to work with us again: remind them of the value we created, show real momentum from their sprint sheet, spell out concretely how we'd help next, and make the next 3-6 months feel exciting, credible, and worth a conversation. It should feel like it was written for them personally — engaging enough that they can't help but reply.
 
 You will be given: (1) the company's T-sheet extract (sprint sheet: goals, strengths, gaps, milestones, financials), and (2) summaries/transcripts of the sessions. Base EVERYTHING you write only on these inputs plus the sprint facts provided. Do not use outside knowledge about the company.
 
@@ -564,8 +593,9 @@ Write the content as a structured JSON object matching the schema you are given.
 
 Voice and style:
 - Speak to the founder in warm, direct second person ("you", "your team", "your growth").
+- Engaging and momentum-building: make them feel understood and eager to keep going. The "howWeHelp" bullets and the headline should give a genuine pull to re-engage — concrete benefit, not sales fluff.
 - Data-led and specific. Prefer numbers, deltas, and concrete outcomes over adjectives.
-- Realistic and credible, never hype. No superlatives, no vague "unlock/synergy/game-changing" language.
+- Realistic and credible, never hype. No superlatives, no vague "unlock/synergy/game-changing" language. Earn excitement with specifics, don't manufacture it with adjectives.
 - Concise to the point of discipline - every field has a word cap; respect it. This must fit on a single page, so shorter is better.
 - Indian context: currency in INR (₹), Indian English.
 
@@ -603,6 +633,7 @@ SCHEMA (respect every word cap and array-length cap - these keep it to one page)
   "projectedImpact": [           // 0-2, MUST be labelled projections/targets
     { "metric": string, "from": string, "to": string, "timeframe": string }
   ],
+  "howWeHelp": string[],         // 3-4 concrete, benefit-led ways WE help THIS founder tackle their gap, <= 16 words each. Start with an action verb. Specific to their situation, never generic.
   "whyThinkingSpree": string,    // 1 punchy credibility line, <= 18 words
   "cta": string,                 // 1 soft line aligned with the email, <= 16 words
   "needsValidation": string[]    // fields the consultant must confirm before sending
@@ -675,6 +706,7 @@ function normaliseGrowthBrief(x: any, companyName: string, founderName: string):
       to: str(p?.to, 80),
       timeframe: str(p?.timeframe, 60),
     })).filter((p) => p.metric),
+    howWeHelp: strList(x?.howWeHelp, 4),
     whyThinkingSpree: str(x?.whyThinkingSpree),
     cta: str(x?.cta),
     needsValidation: strList(x?.needsValidation, 8),

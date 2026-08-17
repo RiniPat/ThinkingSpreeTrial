@@ -36,6 +36,7 @@ import { renderGrowthProspectsDocx } from "../lib/growthProspectsDocx";
 import { renderGrowthProspectsPdf } from "../lib/growthProspectsPdf";
 import { growthProspectsFileStem, type GrowthProspectsBrief } from "../lib/growthProspectsLayout";
 import { driveFor, ensureSalesFolder, uploadToDrive, downloadDriveFile, deleteDriveFile } from "../lib/salesDrive";
+import { isIsbProgram, lookupIsbLinks } from "../lib/isbMapping";
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
@@ -830,6 +831,27 @@ router.get("/sales/followups/:key/context", async (req, res) => {
   }
 });
 
+// ISB autofill: for ISB Cleantech / IRA 2.0 companies, pull the T-Sheet link
+// (col Z) + transcript Gdoc link (col AA) from the "For ISB" master tab so the
+// drawer can pre-fill them. Non-fatal: any failure returns {} and the consultant
+// falls back to pasting the links manually.
+router.get("/sales/followups/:key/isb-links", async (req, res) => {
+  const auth = await requireSales(req, res); if (!auth) return;
+  const key = decodeURIComponent(req.params.key);
+  try {
+    const row = await loadRowForKey(key);
+    if (!row) { res.status(404).json({ error: "Client not found." }); return; }
+    if (!canActOnRow(row, auth)) { res.status(403).json({ error: "Not your company." }); return; }
+    if (!isIsbProgram(row.program)) { res.json({ eligible: false, tSheetUrl: null, transcriptGdocUrl: null }); return; }
+    const links = await lookupIsbLinks(auth.userId, row.startup);
+    res.json({ eligible: true, tSheetUrl: links.sheetLink, transcriptGdocUrl: links.transcriptGdocUrl });
+  } catch (err) {
+    req.log?.warn?.({ err }, "isb-links lookup failed");
+    // Soft-fail so the drawer still opens and manual entry works.
+    res.json({ eligible: true, tSheetUrl: null, transcriptGdocUrl: null, error: err instanceof Error ? err.message : "Couldn't read the ISB master sheet." });
+  }
+});
+
 // Enrichment: read the T-sheet + any submitted docs, summarise, persist (§3.3).
 // Multipart: `files` (uploads) + fields `tSheetUrl`, `docUrls` (JSON), `keepDocIds` (JSON).
 router.post("/sales/followups/:key/enrich", upload.array("files"), async (req, res) => {
@@ -1431,7 +1453,9 @@ function buildRawHtmlMessage(opts: { to: string[]; subject: string; html: string
   const stamp = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
   const altBoundary = `tsfu_alt_${stamp}`;
   const plain = htmlToPlain(opts.html);
-  const wrapped = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#1f2937;">${opts.html}</div>`;
+  // Clean system sans-serif at a normal reading size — deliberately plain so the
+  // email reads like a person wrote it, not a formatted "AI" template.
+  const wrapped = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1f2937;">${opts.html}</div>`;
 
   const altPart = [
     `Content-Type: multipart/alternative; boundary="${altBoundary}"`,

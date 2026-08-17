@@ -159,6 +159,17 @@ export async function renderGrowthProspectsPdf(brief: GrowthProspectsBrief): Pro
         y += 6;
       }
 
+      // How Thinking Spree can help you
+      if (L.howWeHelp.length) {
+        label("How Thinking Spree can help you");
+        for (const h of L.howWeHelp) {
+          doc.fillColor(hex(GP.gold)).font("Helvetica-Bold").fontSize(9).text("→", M, y, { continued: true });
+          doc.fillColor(hex(GP.ink)).font("Helvetica").fontSize(9).text("  " + h, { width: W - 12 });
+          y = doc.y + 3;
+        }
+        y += 6;
+      }
+
       // Why + CTA
       if (L.whyThinkingSpree) { doc.font("Helvetica-Oblique").fontSize(9.5).fillColor(hex(GP.ink)).text(L.whyThinkingSpree, M, y, { width: W }); y = doc.y + 8; }
       if (L.cta) {

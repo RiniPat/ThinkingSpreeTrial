@@ -134,6 +134,11 @@ function programMeta(p: string | null) {
   return hit ?? { bg: "#F1EFE8", fg: "#5F5E5A" };
 }
 
+/** ISB retargeting programmes (ISB Cleantech, ISB IRA 2.0) get sheet autofill. */
+function isIsbProgram(p: string | null): boolean {
+  return /isb|cleantech|ira\s*2/i.test(String(p ?? ""));
+}
+
 // ─── Templates (client-side; can migrate to email_templates table) ──────────
 // Copy is verbatim from the Thinking Spree follow-up playbook. Tokens in
 // [Square Brackets] are placeholders: a few we auto-fill from the sheet +
@@ -144,6 +149,12 @@ type Tmpl = { key: string; name: string; blurb: string; subject: string; body: s
 const SIGNOFF =
   "<p>Warm regards,<br>[Name]<br>[Title], Thinking Spree<br>[Phone] | [Calendar link]</p>";
 const TEMPLATES: Tmpl[] = [
+  {
+    key: "ai_email", name: "AI Email", blurb: "Fully AI-written warm re-engagement from the T-sheet + transcript.",
+    subject: "Reconnecting with [Company]",
+    body:
+      "<p>Click <strong>Generate AI draft</strong> to write a warm, personalised re-engagement email for [Company] from the analysed T-sheet and session transcript.</p>",
+  },
   {
     key: "checkin", name: "Catch-up", blurb: "Warm re-open + 20-min call ask.",
     subject: "Catching up on [Company]",
@@ -938,6 +949,9 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
 
   // Enrichment state.
   const [tSheetUrl, setTSheetUrl] = useState<string>(row.tSheetUrl ?? "");
+  // Transcript Google-Doc (auto-filled from the "For ISB" master sheet for ISB
+  // programmes; read during Analyse as a meeting doc).
+  const [transcriptGdocUrl, setTranscriptGdocUrl] = useState<string>("");
   const [existingDocs, setExistingDocs] = useState<(CtxDoc & { keep: boolean })[]>([]);
   const [pendingLinks, setPendingLinks] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -971,6 +985,24 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctxQuery.data]);
+
+  // ISB autofill — for ISB Cleantech / IRA 2.0, pull the T-Sheet + transcript
+  // Gdoc links from the "For ISB" master sheet and pre-fill any empty field.
+  // Never clobbers a value the consultant already has (typed or hydrated).
+  const isbEligible = isIsbProgram(row.program);
+  const isbQuery = useQuery<{ eligible: boolean; tSheetUrl: string | null; transcriptGdocUrl: string | null }>({
+    queryKey: ["/api/sales/followups", row.key, "isb-links"],
+    queryFn: () => customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/isb-links`), { credentials: "include" }),
+    enabled: isbEligible,
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    const d = isbQuery.data;
+    if (!d) return;
+    if (d.tSheetUrl) setTSheetUrl((prev) => (prev.trim() ? prev : d.tSheetUrl!));
+    if (d.transcriptGdocUrl) setTranscriptGdocUrl((prev) => (prev.trim() ? prev : d.transcriptGdocUrl!));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isbQuery.data]);
 
   const picks: DbTemplate[] = templates.length
     ? templates
@@ -1016,7 +1048,13 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
     mutationFn: () => {
       const fd = new FormData();
       fd.append("tSheetUrl", tSheetUrl.trim());
-      fd.append("docUrls", JSON.stringify(pendingLinks));
+      // Fold the transcript Gdoc into the doc links (deduped against docs already
+      // read) so Analyse reads it alongside any manually-added meeting docs.
+      const keptUrls = new Set(existingDocs.filter((d) => d.keep && d.url).map((d) => d.url as string));
+      const t = transcriptGdocUrl.trim();
+      const docUrls = [...pendingLinks];
+      if (t && !keptUrls.has(t) && !docUrls.includes(t)) docUrls.push(t);
+      fd.append("docUrls", JSON.stringify(docUrls));
       fd.append("keepDocIds", JSON.stringify(existingDocs.filter((d) => d.keep).map((d) => d.id)));
       for (const f of pendingFiles) fd.append("files", f);
       return customFetch(api(`/sales/followups/${encodeURIComponent(row.key)}/enrich`), { method: "POST", credentials: "include", body: fd });
@@ -1201,10 +1239,24 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
               )}
             </div>
             <label className="block text-sm">
-              <span className="mb-1 block text-[11px] text-muted-foreground">T-sheet URL (Google Sheet)</span>
+              <span className="mb-1 block text-[11px] text-muted-foreground">
+                T-sheet URL (Google Sheet)
+                {isbEligible && isbQuery.data?.tSheetUrl && <span className="ml-1 text-[10px] text-muted-foreground/80">· auto-filled from For ISB</span>}
+              </span>
               <input value={tSheetUrl} onChange={(e) => setTSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/…"
                 className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
             </label>
+
+            {isbEligible && (
+              <label className="mt-3 block text-sm">
+                <span className="mb-1 block text-[11px] text-muted-foreground">
+                  Transcript (Google Doc)
+                  {isbQuery.data?.transcriptGdocUrl && <span className="ml-1 text-[10px] text-muted-foreground/80">· auto-filled from For ISB</span>}
+                </span>
+                <input value={transcriptGdocUrl} onChange={(e) => setTranscriptGdocUrl(e.target.value)} placeholder="https://docs.google.com/document/…"
+                  className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />
+              </label>
+            )}
 
             {/* Doc attach — optional, add as many (or none) */}
             <div className="mt-3">
@@ -1257,7 +1309,7 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
               )}
               {enrichError && <p className="mt-1.5 text-[11px]" style={{ color: "#A85A1F" }}>{enrichError}</p>}
 
-              <button onClick={() => analyse.mutate()} disabled={!actionable || analyse.isPending || (!tSheetUrl.trim() && docTotal === 0)}
+              <button onClick={() => analyse.mutate()} disabled={!actionable || analyse.isPending || (!tSheetUrl.trim() && !transcriptGdocUrl.trim() && docTotal === 0)}
                 className="mt-2 inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent disabled:opacity-60">
                 {analyse.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
                 {enrichStatus ? "Re-analyse" : "Analyse"}
@@ -1338,7 +1390,7 @@ function ComposeDrawer({ row, templates, profile, onClose }: { row: Followup; te
                 <ToolBtn onClick={() => exec("insertOrderedList")} title="Numbered list"><ListOrdered size={15} /></ToolBtn>
               </div>
               <div ref={editorRef} contentEditable suppressContentEditableWarning data-testid="followup-editor"
-                className="prose prose-sm min-h-[200px] max-w-none px-3 py-3 text-sm outline-none [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5" />
+                className="prose prose-sm min-h-[200px] max-w-none px-3 py-3 font-sans text-[15px] leading-relaxed outline-none [&_*]:font-sans [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5" />
             </div>
             <p className="mt-1.5 text-[11px] text-muted-foreground">Highlighted [brackets] still need filling. Bold, italics, highlight and lists all carry into the email.</p>
           </div>
@@ -1475,7 +1527,7 @@ const RichTextField = forwardRef<RichHandle, { initialHtml?: string; minHeight?:
           <Btn cmd="insertOrderedList" title="Numbered list"><ListOrdered size={15} /></Btn>
         </div>
         <div ref={elRef} contentEditable suppressContentEditableWarning
-          className="prose prose-sm max-w-none px-3 py-3 text-sm outline-none [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5"
+          className="prose prose-sm max-w-none px-3 py-3 font-sans text-[15px] leading-relaxed outline-none [&_*]:font-sans [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5"
           style={{ minHeight }} />
       </div>
     );

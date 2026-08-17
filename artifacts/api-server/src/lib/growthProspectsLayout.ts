@@ -51,6 +51,7 @@ export type GrowthProspectsBrief = {
   keyGap: string;
   plan: GrowthPhase[];
   projectedImpact?: GrowthProjectedImpact[];
+  howWeHelp: string[];            // 3-4 concrete, benefit-led ways TS helps THIS founder
   whyThinkingSpree: string;
   cta: string;
   needsValidation: string[];
@@ -131,6 +132,7 @@ export function growthProspectsLayout(brief: GrowthProspectsBrief) {
       to: truncate(p.to, 30),
       timeframe: truncate(p.timeframe, 28),
     })),
+    howWeHelp: (brief.howWeHelp ?? []).slice(0, 4).map((s) => truncate(s, 110)),
     whyThinkingSpree: truncate(brief.whyThinkingSpree, 140),
     cta: truncate(brief.cta, 130),
   };

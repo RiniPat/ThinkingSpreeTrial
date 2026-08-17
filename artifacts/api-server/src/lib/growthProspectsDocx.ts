@@ -183,6 +183,20 @@ export async function renderGrowthProspectsDocx(brief: GrowthProspectsBrief): Pr
     }
   }
 
+  // ── How Thinking Spree can help you ─────────────────────────────────────────
+  if (L.howWeHelp.length) {
+    children.push(sectionLabel("How Thinking Spree can help you"));
+    for (const h of L.howWeHelp) {
+      children.push(new Paragraph({
+        spacing: { after: 60 },
+        children: [
+          run("→  ", { bold: true, color: GP.gold, size: 18 }),
+          run(h, { color: GP.ink, size: 17 }),
+        ],
+      }));
+    }
+  }
+
   // ── Why + CTA footer ───────────────────────────────────────────────────────
   if (L.whyThinkingSpree) children.push(new Paragraph({ spacing: { before: 160, after: 40 }, children: [run(L.whyThinkingSpree, { italics: true, color: GP.ink, size: 17 })] }));
   if (L.cta) children.push(new Paragraph({
