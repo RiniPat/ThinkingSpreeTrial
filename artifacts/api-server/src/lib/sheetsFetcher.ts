@@ -39,6 +39,27 @@ function extractHyperlinkUrl(formula: string | null | undefined): string | null 
   return m ? m[1] : null;
 }
 
+/**
+ * Coerce a Google Sheet tab title into a valid, unique XLSX worksheet name.
+ * XLSX forbids the characters : \ / ? * [ ] and caps names at 31 chars — a raw
+ * Google title containing any of them makes `book_append_sheet` throw
+ * "Sheet name cannot contain : \ / ? * [ ]". We only use the name as a label,
+ * so replacing the forbidden characters with a space (and de-duplicating) is
+ * safe. `used` tracks names already added so collisions get a numeric suffix.
+ */
+function safeSheetName(title: string, used: Set<string>): string {
+  let base = (title ?? "").replace(/[:\\/?*\[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 31).trim();
+  if (!base) base = "Sheet";
+  let name = base;
+  let i = 2;
+  while (used.has(name.toLowerCase())) {
+    const suffix = ` (${i++})`;
+    name = base.slice(0, 31 - suffix.length).trim() + suffix;
+  }
+  used.add(name.toLowerCase());
+  return name;
+}
+
 export async function fetchSheetAsWorkbook(
   userId: number,
   sheetUrlOrId: string,
@@ -122,6 +143,7 @@ export async function fetchSheetAsWorkbook(
   // → looks at the cell to the right → sees the URL → stores it as deckUrl.
   // Other cells (plain values, normal formulas) are passed through unchanged.
   const wb = XLSX.utils.book_new();
+  const usedNames = new Set<string>();
   for (let i = 0; i < titles.length; i++) {
     const title = titles[i];
     const displayRows = displayPerSheet[i] ?? [];
@@ -136,7 +158,7 @@ export async function fetchSheetAsWorkbook(
     );
 
     const ws = XLSX.utils.aoa_to_sheet(merged.length > 0 ? merged : [[""]]);
-    XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
+    XLSX.utils.book_append_sheet(wb, ws, safeSheetName(title, usedNames));
   }
 
   return wb;
